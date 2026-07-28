@@ -8,6 +8,13 @@ with Learning-Based Adversarial Attack Evaluation
 - nVITA：标准 DE/rand/1/bin 差分进化稀疏黑盒攻击
 - LBA：双分支CNN学习攻击模式，支持扰动特征数量约束
 """
+""
+## 第一次运行：训练并保存模型
+#python LBA-MOACB-WSF.py --save_model output/best_model.pt
+
+# 后续消融实验：加载模型，仅跑攻击评估（跳过搜索和训练）
+#python LBA-MOACB-WSF.py --load_model output/best_model.pt --perturb_mask "0010"
+#python LBA-MOACB-WSF.py --load_model output/best_model.pt --perturb_mask "1111" --feat_constraint 2
 
 import os
 import sys
@@ -51,7 +58,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 FILENAME = 'winddata.xlsx'
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
-SEQUENCE_LENGTH = 10
+SEQUENCE_LENGTH =48
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -64,10 +71,10 @@ NUM_LSTM_MODULES = 2
 TOPO_BITS_LENGTH = NUM_MODULES * (NUM_MODULES - 1) // 2
 INDIVIDUAL_LENGTH = TOPO_BITS_LENGTH + 5 * NUM_CNN_MODULES + 5 * NUM_LSTM_MODULES + 4
 
-POP_SIZE = 6
-MAX_GEN = 4
+POP_SIZE = 60
+MAX_GEN = 40
 NUM_RUNS = 1
-MUTATION_PROB = 0.5
+MUTATION_PROB = 0.6
 CROSSOVER_PROB = 0.8
 LAMBDA_REG = 1e-4
 
@@ -103,16 +110,16 @@ BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 #   delta: LBA 生成扰动时的缩放系数（原论文中的 δ）
 LBA_CONFIG = {
     'n': 1,  # number of perturbations per sample
-    'beta': 0.05,  # nVITA perturbation budget factor (原论文 β)
-    'maxiter': 20,  # DE max iterations for nVITA baseline
+    'beta': 0.1,  # nVITA perturbation budget factor (原论文 β)
+    'maxiter': 60,  # DE max iterations for nVITA baseline
     'tol': 0.01,  # tolerance for nVITA
     'adv_cnt': 100,  # number of adv examples for LBA training
     'lba_epochs': 50,  # LBA model training epochs
-    'lba_lr': 0.001,  # LBA model learning rate
-    'lba_batch_size': 25,  # LBA model batch size
+    'lba_lr': 0.005,  # LBA model learning rate
+    'lba_batch_size': 8,  # LBA model batch size
     'delta_list': [0.75, 1.0, 1.5, 1.75],  # LBA attack scaling factors (原论文 δ)
-    'use_bayesian': False,  # whether to use Bayesian layers (requires blitz)
-    'perturb_mask': '0010',  # 二进制掩码表示是否扰动特征，1表示扰动，0表示不扰动
+    'use_bayesian': True,   # 启用贝叶斯卷积层，提升泛化性和不确定性估计
+    'perturb_mask': '0000',  # 二进制掩码表示是否扰动特征，1表示扰动，0表示不扰动
                              # 例如'0010'表示只扰动第3个特征(0-based索引2)
                              # '1111'表示扰动所有4个特征
     'feature_constraint': None,  # 扰动特征数量约束 (None=不限制, 整数=限定特征数)
@@ -865,10 +872,142 @@ class LBA_Dataset(Dataset):
         return self.data[idx], self.mask[idx], self.perturb[idx]
 
 
+class BayesianConv1d(nn.Module):
+    """
+    贝叶斯卷积层：使用权重不确定性建模，提升模型泛化性和不确定性估计
+    采用局部重参数化技巧 (Local Reparameterization Trick) 提高效率
+    无需外部库 blitz，完全自包含实现
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size,)
+        self.stride = stride
+        self.padding = padding
+
+        # 后验参数: 权重均值 和 log方差
+        self.weight_mu = nn.Parameter(
+            torch.empty(out_channels, in_channels, *self.kernel_size)
+        )
+        self.weight_log_sigma = nn.Parameter(
+            torch.empty(out_channels, in_channels, *self.kernel_size)
+        )
+        self.bias_mu = nn.Parameter(torch.empty(out_channels))
+        self.bias_log_sigma = nn.Parameter(torch.empty(out_channels))
+
+        # 先验: 标准正态 N(0, 1)
+        self.prior_mu = 0.0
+        self.prior_sigma = 1.0
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        # 用 Glorot 初始化均值，log_sigma 初始为较小负值
+        nn.init.kaiming_uniform_(self.weight_mu, a=math.sqrt(5))
+        nn.init.constant_(self.weight_log_sigma, -3.0)
+        nn.init.zeros_(self.bias_mu)
+        nn.init.constant_(self.bias_log_sigma, -3.0)
+
+    def forward(self, x):
+        # 局部重参数化技巧：直接采样输出，而非采样权重
+        weight_sigma = torch.exp(self.weight_log_sigma)
+        bias_sigma = torch.exp(self.bias_log_sigma)
+
+        # 输出的均值和方差
+        act_mu = F.conv1d(x, self.weight_mu, self.bias_mu,
+                         stride=self.stride, padding=self.padding)
+        act_var = F.conv1d(x ** 2, weight_sigma ** 2, bias_sigma ** 2,
+                          stride=self.stride, padding=self.padding)
+        act_std = torch.sqrt(act_var + 1e-8)
+
+        # 重参数化采样: output = mu + sigma * eps
+        eps = torch.randn_like(act_mu)
+        return act_mu + act_std * eps
+
+    def kl_divergence(self):
+        """
+        计算后验与先验之间的 KL 散度
+        KL(q(w|θ) || p(w))，其中 q 为高斯后验，p 为标准高斯先验
+        """
+        weight_sigma = torch.exp(self.weight_log_sigma)
+        bias_sigma = torch.exp(self.bias_log_sigma)
+
+        # KL for weights: log(σ_prior/σ_q) + (σ_q^2 + (μ_q - μ_prior)^2)/(2σ_prior^2) - 0.5
+        kl_w = (
+            torch.log(torch.tensor(self.prior_sigma) / weight_sigma)
+            + (weight_sigma ** 2 + (self.weight_mu - self.prior_mu) ** 2) / (2 * self.prior_sigma ** 2)
+            - 0.5
+        ).sum()
+
+        # KL for bias
+        kl_b = (
+            torch.log(torch.tensor(self.prior_sigma) / bias_sigma)
+            + (bias_sigma ** 2 + (self.bias_mu - self.prior_mu) ** 2) / (2 * self.prior_sigma ** 2)
+            - 0.5
+        ).sum()
+
+        return kl_w + kl_b
+
+
+class BayesianLinear(nn.Module):
+    """
+    贝叶斯全连接层：同样使用权重不确定性建模
+    """
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
+        self.weight_log_sigma = nn.Parameter(torch.empty(out_features, in_features))
+        self.bias_mu = nn.Parameter(torch.empty(out_features))
+        self.bias_log_sigma = nn.Parameter(torch.empty(out_features))
+
+        self.prior_mu = 0.0
+        self.prior_sigma = 1.0
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.weight_mu, a=math.sqrt(5))
+        nn.init.constant_(self.weight_log_sigma, -3.0)
+        nn.init.zeros_(self.bias_mu)
+        nn.init.constant_(self.bias_log_sigma, -3.0)
+
+    def forward(self, x):
+        weight_sigma = torch.exp(self.weight_log_sigma)
+        bias_sigma = torch.exp(self.bias_log_sigma)
+
+        act_mu = F.linear(x, self.weight_mu, self.bias_mu)
+        act_var = F.linear(x ** 2, weight_sigma ** 2, bias_sigma ** 2)
+        act_std = torch.sqrt(act_var + 1e-8)
+
+        eps = torch.randn_like(act_mu)
+        return act_mu + act_std * eps
+
+    def kl_divergence(self):
+        weight_sigma = torch.exp(self.weight_log_sigma)
+        bias_sigma = torch.exp(self.bias_log_sigma)
+
+        kl_w = (
+            torch.log(torch.tensor(self.prior_sigma) / weight_sigma)
+            + (weight_sigma ** 2 + (self.weight_mu - self.prior_mu) ** 2) / (2 * self.prior_sigma ** 2)
+            - 0.5
+        ).sum()
+        kl_b = (
+            torch.log(torch.tensor(self.prior_sigma) / bias_sigma)
+            + (bias_sigma ** 2 + (self.bias_mu - self.prior_mu) ** 2) / (2 * self.prior_sigma ** 2)
+            - 0.5
+        ).sum()
+        return kl_w + kl_b
+
+
 class CNN_LBA_Model(nn.Module):
     """
     LBA 学习模型：学习输入时序 -> 敏感位置 + 扰动值 的映射
-    卷积在时间维度滑动，双分支输出全位置的分类logits与回归值
+    卷积在时间维度滑动，双分支输出全位置的分类 logits 与回归值
+    use_bayesian=True 时启用贝叶斯卷积层和全连接层，提升泛化性和不确定性估计
     """
     def __init__(self, num_features, seq_len, n, use_bayesian=False):
         super(CNN_LBA_Model, self).__init__()
@@ -876,21 +1015,29 @@ class CNN_LBA_Model(nn.Module):
         self.seq_len = seq_len
         self.n = n
         self.total_positions = seq_len * num_features
+        self.use_bayesian = use_bayesian
 
-        # Conv1d: in_channels = 特征数, 在时间维度上卷积
-        self.conv1 = nn.Conv1d(num_features, 32, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm1d(32)
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm1d(64)
-
-        # 共享全连接层
-        self.fc_shared = nn.Linear(64 * seq_len, 128)
-        self.bn_shared = nn.BatchNorm1d(128)
-
-        # 分支1: 敏感点分类 (输出每个位置的扰动logits)
-        self.fc_cls = nn.Linear(128, self.total_positions)
-        # 分支2: 扰动值回归 (输出每个位置的扰动幅度)
-        self.fc_reg = nn.Linear(128, self.total_positions)
+        if use_bayesian:
+            # 贝叶斯卷积层 + 全连接层
+            self.conv1 = BayesianConv1d(num_features, 32, kernel_size=3, stride=1, padding=1)
+            self.conv2 = BayesianConv1d(32, 64, kernel_size=3, stride=1, padding=1)
+            self.fc_shared = BayesianLinear(64 * seq_len, 128)
+            self.fc_cls = BayesianLinear(128, self.total_positions)
+            self.fc_reg = BayesianLinear(128, self.total_positions)
+            # 贝叶斯模式下仍保留 BN（用于稳定训练）
+            self.bn1 = nn.BatchNorm1d(32)
+            self.bn2 = nn.BatchNorm1d(64)
+            self.bn_shared = nn.BatchNorm1d(128)
+        else:
+            # 普通确定性层
+            self.conv1 = nn.Conv1d(num_features, 32, kernel_size=3, stride=1, padding=1)
+            self.bn1 = nn.BatchNorm1d(32)
+            self.conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
+            self.bn2 = nn.BatchNorm1d(64)
+            self.fc_shared = nn.Linear(64 * seq_len, 128)
+            self.bn_shared = nn.BatchNorm1d(128)
+            self.fc_cls = nn.Linear(128, self.total_positions)
+            self.fc_reg = nn.Linear(128, self.total_positions)
 
     def forward(self, x):
         # x shape: (batch, seq_len, features) -> 转置为 (batch, features, seq_len)
@@ -904,8 +1051,19 @@ class CNN_LBA_Model(nn.Module):
         reg_values = self.fc_reg(x)    # (batch, total_positions)
         return cls_logits, reg_values
 
+    def kl_divergence(self):
+        """汇总所有贝叶斯层的 KL 散度（仅贝叶斯模式下有效）"""
+        if not self.use_bayesian:
+            return torch.tensor(0.0)
+        kl = torch.tensor(0.0)
+        for module in self.modules():
+            if isinstance(module, (BayesianConv1d, BayesianLinear)):
+                kl = kl + module.kl_divergence()
+        return kl
+
     def __str__(self):
-        return "CNN_LBA_Model"
+        mode = "Bayesian" if self.use_bayesian else "Deterministic"
+        return f"CNN_LBA_Model({mode})"
 
 
 def build_lba_labels(X_adv, X_clean, device):
@@ -925,22 +1083,26 @@ def build_lba_labels(X_adv, X_clean, device):
 
 
 def train_lba_model(train_data, model, batch_size=25, learning_rate=0.001, epochs=50,
-                    device='cpu', print_info=False, n=1):
+                    device='cpu', print_info=False, n=1, use_bayesian=False):
     """
     训练 LBA 模型
     分类损失: 
       - n=1 时使用 CrossEntropyLoss (单标签多分类，与原论文一致)
       - n>1 时使用 BCEWithLogitsLoss (多标签二分类)
     回归损失: MSELoss (仅在真实扰动位置计算)
+    贝叶斯模式: 额外添加 KL 散度正则项，约束后验权重接近先验
     """
     if n == 1:
-        # 单标签多分类: 每个样本只有1个敏感点，使用交叉熵损失
         criterion_cls = nn.CrossEntropyLoss()
     else:
-        # 多标签二分类: 每个样本可能有多个敏感点
         criterion_cls = nn.BCEWithLogitsLoss()
     criterion_reg = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # 贝叶斯模式下使用 KL 散度权重系数：1 / (batch_size * num_batches)
+    # 保证 KL 项与数据似然项量级相当
+    num_batches = max(1, len(train_data) // batch_size)
+    kl_weight = 1.0 / (batch_size * num_batches) if use_bayesian else 0.0
 
     loss_cls_list = []
     loss_reg_list = []
@@ -979,6 +1141,12 @@ def train_lba_model(train_data, model, batch_size=25, learning_rate=0.001, epoch
 
             # 联合损失
             loss = loss_cls + 0.5 * loss_reg
+
+            # 贝叶斯模式：添加 KL 散度正则项
+            if use_bayesian:
+                kl_loss = model.kl_divergence() * kl_weight
+                loss = loss + kl_loss
+
             loss.backward()
             optimizer.step()
 
@@ -991,8 +1159,9 @@ def train_lba_model(train_data, model, batch_size=25, learning_rate=0.001, epoch
         loss_reg_list.append(avg_reg)
 
         if print_info and (epoch + 1) % 10 == 0:
+            kl_str = f", KL: {model.kl_divergence().item() * kl_weight:.6f}" if use_bayesian else ""
             print(f"  LBA Epoch {epoch + 1}/{epochs}, "
-                  f"Cls Loss: {avg_cls:.6f}, Reg Loss: {avg_reg:.6f}")
+                  f"Cls Loss: {avg_cls:.6f}, Reg Loss: {avg_reg:.6f}{kl_str}")
 
     return loss_cls_list, loss_reg_list
 
@@ -1502,12 +1671,12 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
     print(f"  训练集大小: {len(lba_data)} 个样本")
 
     # Step 3: 训练 LBA 模型
-    print(f"\n[Step 3/4] 训练 LBA 模型 (epochs={lba_epochs}, lr={lba_lr})...")
+    print(f"\n[Step 3/4] 训练 LBA 模型 (epochs={lba_epochs}, lr={lba_lr}, bayesian={use_bayesian})...")
     lba_model = CNN_LBA_Model(num_features, seq_len, n, use_bayesian=use_bayesian)
     train_lba_model(
         lba_data, lba_model,
         batch_size=lba_batch_size, learning_rate=lba_lr, epochs=lba_epochs,
-        device=device, print_info=print_info, n=n
+        device=device, print_info=print_info, n=n, use_bayesian=use_bayesian
     )
 
     lba_save_path = os.path.join(OUTPUT_DIR, 'LBA_models', 'lba_model_moacb_wsf.pt')
@@ -1741,11 +1910,16 @@ def main():
     parser.add_argument('--adv_cnt', type=int, default=100, help='Adv examples for LBA training')
     parser.add_argument('--delta_list', type=float, nargs='+', default=[0.75, 1.0, 1.5, 1.75],
                         help='LBA delta values (原论文 δ)')
-    parser.add_argument('--use_bayesian', action='store_true', help='Use BayesianConv1d (requires blitz)')
+    parser.add_argument('--use_bayesian', action='store_true', default=LBA_CONFIG['use_bayesian'], help='Use BayesianConv1d (requires blitz)')
     parser.add_argument('--feat_constraint', type=int, default=LBA_CONFIG['feature_constraint'],
                         help='Number of features allowed to perturb (None = all features)')
     parser.add_argument('--perturb_mask', type=str, default=LBA_CONFIG['perturb_mask'],
                         help='Binary mask for feature perturbation. E.g., "0010" means only perturb feature 2')
+    # ====== 新增: 模型冻结与复用参数 ======
+    parser.add_argument('--save_model', type=str, default=None,
+                        help='Path to save the trained model checkpoint (model weights + architecture params)')
+    parser.add_argument('--load_model', type=str, default=None,
+                        help='Path to load a pre-trained model checkpoint (skip NSGA-II search and training)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     args = parser.parse_args()
     
@@ -1798,378 +1972,436 @@ def main():
     X_test_full = X_test_full.to(DEVICE)
     Y_test_full = Y_test_full.to(DEVICE)
 
-    for run_id in range(NUM_RUNS):
+    # ====== 新增: 判断是否触发 load_model 模式 ======
+    load_model_mode = args.load_model is not None and os.path.isfile(args.load_model)
+    if load_model_mode:
+        print(f"\n>>> 检测到 --load_model 路径: {args.load_model}")
+        print(">>> 将跳过 NSGA-II 搜索和最终训练，直接加载已训练模型进行攻击评估。")
+        # 加载模型模式下，NUM_RUNS 循环只执行 1 次
+        actual_num_runs = 1
+    else:
+        if args.load_model is not None and not os.path.isfile(args.load_model):
+            print(f"\n>>> 警告: --load_model 指定的文件不存在: {args.load_model}")
+            print(">>> 将按正常流程执行 NSGA-II 搜索和训练。")
+        actual_num_runs = NUM_RUNS
+
+    for run_id in range(actual_num_runs):
         print(f"\n{'*' * 80}")
-        print(f"开始第 {run_id + 1}/{NUM_RUNS} 次独立运行...")
+        print(f"开始第 {run_id + 1}/{actual_num_runs} 次独立运行...")
         print(f"{'*' * 80}\n")
 
         prefix = f"{OUTPUT_DIR}/run{run_id + 1}_"
 
         print(f'使用设备: {DEVICE}')
 
-        print('\n========== 开始NSGA-II优化自动化深度学习模型 ==========')
-        start_time = time.time()
+        # ====== 新增: 加载模型或执行 NSGA-II 搜索 + 训练 ======
+        if load_model_mode:
+            # ---------- 从 checkpoint 加载已训练模型 ----------
+            print(f"\n>>> 正在从 checkpoint 加载模型: {args.load_model}")
+            checkpoint = torch.load(args.load_model, map_location=DEVICE)
+            topo = checkpoint['topo']
+            cnn_params = checkpoint['cnn_params']
+            lstm_params = checkpoint['lstm_params']
+            setting = checkpoint['setting']
+            batch_size, learn_rate, opt_type, reg_type = decode_hyperparams(setting)
 
-        population = initialize_population(POP_SIZE, train_dataset)
-        print(f'初始化完成,种群大小: {len(population)}')
-
-        best_rmse_history = []
-        best_complexity_history = []
-        all_pareto_fronts = []
-
-        for gen in range(MAX_GEN):
-            print(f'\n第 {gen + 1}/{MAX_GEN} 代...')
-            performance, complexity = evaluate_population(
-                population, train_dataset, val_dataset, min_speed, max_speed,
-                num_features, SEQUENCE_LENGTH, DEVICE
-            )
-            fronts, rank = fast_non_dominated_sort(performance, complexity)
-            distance = crowding_distance(performance, complexity, fronts)
-            mating_pool = tournament_selection(population, rank, distance, POP_SIZE)
-            offspring = crossover_population(mating_pool)
-            mutated_offspring = []
-            for child in offspring:
-                if np.random.random() < MUTATION_PROB:
-                    mutated_child = variable_length_mutation(child)
-                    mutated_offspring.append(mutated_child)
-                else:
-                    mutated_offspring.append(child.copy())
-            offspring_perf, offspring_comp = evaluate_population(
-                mutated_offspring, train_dataset, val_dataset, min_speed, max_speed,
-                num_features, SEQUENCE_LENGTH, DEVICE
-            )
-            combined_pop = population + mutated_offspring
-            combined_perf = np.concatenate([performance, offspring_perf])
-            combined_comp = np.concatenate([complexity, offspring_comp])
-            combined_fronts, combined_rank = fast_non_dominated_sort(combined_perf, combined_comp)
-            combined_dist = crowding_distance(combined_perf, combined_comp, combined_fronts)
-            population, performance, complexity = environmental_selection(
-                combined_pop, combined_perf, combined_comp, combined_rank, combined_dist, POP_SIZE
-            )
-            pareto_front = {
-                'params': [combined_pop[i] for i in combined_fronts[0]],
-                'performance': combined_perf[combined_fronts[0]],
-                'complexity': combined_comp[combined_fronts[0]],
-                'num_solutions': len(combined_fronts[0]),
-                'generation': gen + 1
-            }
-            all_pareto_fronts.append(pareto_front)
-
-            valid_combined_perf = combined_perf[np.isfinite(combined_perf)]
-            if len(valid_combined_perf) > 0:
-                best_idx_combined = np.argmin(valid_combined_perf)
-                best_rmse_history.append(valid_combined_perf[best_idx_combined])
-                best_complexity_history.append(combined_comp[best_idx_combined])
-            else:
-                best_rmse_history.append(float('inf'))
-                best_complexity_history.append(float('inf'))
-
-        end_time = time.time()
-        print(f'\n第 {run_id + 1} 次优化完成!总耗时: {end_time - start_time:.2f} 秒')
-
-        # 选择最优个体
-        final_pareto = all_pareto_fronts[-1]
-        if final_pareto['num_solutions'] > 0:
-            perf_vals = final_pareto['performance']
-            comp_vals = final_pareto['complexity']
-            valid_mask = np.isfinite(perf_vals) & np.isfinite(comp_vals)
-            if valid_mask.any():
-                perf_vals = perf_vals[valid_mask]
-                comp_vals = comp_vals[valid_mask]
-                params = [final_pareto['params'][i] for i in range(len(valid_mask)) if valid_mask[i]]
-                normalized_perf = (perf_vals - perf_vals.min()) / (perf_vals.max() - perf_vals.min() + 1e-10)
-                normalized_comp = (comp_vals - comp_vals.min()) / (comp_vals.max() - comp_vals.min() + 1e-10)
-                trade_off_scores = np.sqrt(normalized_perf ** 2 + normalized_comp ** 2)
-                best_idx = np.argmin(trade_off_scores)
-                best_individual = params[best_idx]
-            else:
-                raise ValueError("最后一代没有有效解")
-        else:
-            all_perf = np.concatenate([pf['performance'] for pf in all_pareto_fronts])
-            all_params = [p for pf in all_pareto_fronts for p in pf['params']]
-            valid_mask = np.isfinite(all_perf)
-            if valid_mask.any():
-                best_idx = np.argmin(all_perf[valid_mask])
-                best_individual = np.array(all_params)[valid_mask][best_idx]
-            else:
-                raise ValueError("所有个体评估均失败!")
-
-        topo, cnn_params, lstm_params, setting = decode_individual(best_individual)
-        batch_size, learn_rate, opt_type, reg_type = decode_hyperparams(setting)
-
-        print(f'\n第 {run_id + 1} 次运行最终优化的超参数数值:')
-        print(f' batch_size: {batch_size}')
-        print(f' learning_rate: {learn_rate:.6f}')
-        print(f' optimizer: {opt_type}')
-        print(f' regularizer: {reg_type}')
-
-        print('\n训练最终模型...')
-        model = HybridCNNBiLSTM(topo, cnn_params, lstm_params, num_features, SEQUENCE_LENGTH).to(DEVICE)
-        if torch.cuda.device_count() > 1:
-            model = nn.DataParallel(model)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size)
-        criterion = nn.MSELoss()
-
-        if opt_type == 'Adam':
-            optimizer = optim.Adam(model.parameters(), lr=learn_rate)
-        elif opt_type == 'SGD':
-            optimizer = optim.SGD(model.parameters(), lr=learn_rate, momentum=0.9)
-        elif opt_type == 'RMSprop':
-            optimizer = optim.RMSprop(model.parameters(), lr=learn_rate)
-        else:
-            optimizer = optim.Adadelta(model.parameters(), lr=learn_rate)
-
-        train_losses = []
-        val_losses = []
-        best_val_loss = float('inf')
-        patience_counter = 0
-
-        for epoch in range(FINAL_EPOCHS):
-            model.train()
-            train_loss = 0
-            for inputs, targets in train_loader:
-                inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
-                optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
-
-                if reg_type is not None:
-                    l1_penalty = torch.tensor(0., device=DEVICE)
-                    l2_penalty = torch.tensor(0., device=DEVICE)
-                    for name, param in model.named_parameters():
-                        if 'bias' in name or 'bn' in name:
-                            continue
-                        if reg_type in ['L1', 'L1L2']:
-                            l1_penalty += torch.norm(param, 1)
-                        if reg_type in ['L2', 'L1L2']:
-                            l2_penalty += torch.norm(param, 2)
-                    loss += LAMBDA_REG * (l1_penalty + l2_penalty)
-
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRADIENT_CLIP)
-                optimizer.step()
-                train_loss += loss.item()
-
+            model = HybridCNNBiLSTM(topo, cnn_params, lstm_params, num_features, SEQUENCE_LENGTH).to(DEVICE)
+            model.load_state_dict(checkpoint['model_state_dict'])
             model.eval()
-            val_loss = 0
-            val_samples = 0
+            print(">>> 模型加载成功！已跳过 NSGA-II 搜索和最终训练阶段。")
+            print(f'    topo:        {topo}')
+            print(f'    cnn_params:  {cnn_params}')
+            print(f'    lstm_params: {lstm_params}')
+            print(f'    setting:     {setting}')
+            print(f'    batch_size:  {batch_size}')
+            print(f'    learn_rate:  {learn_rate:.6f}')
+            print(f'    optimizer:   {opt_type}')
+            print(f'    regularizer: {reg_type}')
+
+            # 为后续兼容：初始化占位变量（加载模式下不使用）
+            all_pareto_fronts = []
+            train_losses, val_losses = [], []
+            test_performance = {}
+            best_individual = None
+        else:
+            # ---------- 正常流程: NSGA-II 搜索 + 最终训练 ----------
+            print('\n========== 开始NSGA-II优化自动化深度学习模型 ==========')
+            start_time = time.time()
+
+            population = initialize_population(POP_SIZE, train_dataset)
+            print(f'初始化完成,种群大小: {len(population)}')
+
+            best_rmse_history = []
+            best_complexity_history = []
+            all_pareto_fronts = []
+
+            for gen in range(MAX_GEN):
+                print(f'\n第 {gen + 1}/{MAX_GEN} 代...')
+                performance, complexity = evaluate_population(
+                    population, train_dataset, val_dataset, min_speed, max_speed,
+                    num_features, SEQUENCE_LENGTH, DEVICE
+                )
+                fronts, rank = fast_non_dominated_sort(performance, complexity)
+                distance = crowding_distance(performance, complexity, fronts)
+                mating_pool = tournament_selection(population, rank, distance, POP_SIZE)
+                offspring = crossover_population(mating_pool)
+                mutated_offspring = []
+                for child in offspring:
+                    if np.random.random() < MUTATION_PROB:
+                        mutated_child = variable_length_mutation(child)
+                        mutated_offspring.append(mutated_child)
+                    else:
+                        mutated_offspring.append(child.copy())
+                offspring_perf, offspring_comp = evaluate_population(
+                    mutated_offspring, train_dataset, val_dataset, min_speed, max_speed,
+                    num_features, SEQUENCE_LENGTH, DEVICE
+                )
+                combined_pop = population + mutated_offspring
+                combined_perf = np.concatenate([performance, offspring_perf])
+                combined_comp = np.concatenate([complexity, offspring_comp])
+                combined_fronts, combined_rank = fast_non_dominated_sort(combined_perf, combined_comp)
+                combined_dist = crowding_distance(combined_perf, combined_comp, combined_fronts)
+                population, performance, complexity = environmental_selection(
+                    combined_pop, combined_perf, combined_comp, combined_rank, combined_dist, POP_SIZE
+                )
+                pareto_front = {
+                    'params': [combined_pop[i] for i in combined_fronts[0]],
+                    'performance': combined_perf[combined_fronts[0]],
+                    'complexity': combined_comp[combined_fronts[0]],
+                    'num_solutions': len(combined_fronts[0]),
+                    'generation': gen + 1
+                }
+                all_pareto_fronts.append(pareto_front)
+
+                valid_combined_perf = combined_perf[np.isfinite(combined_perf)]
+                if len(valid_combined_perf) > 0:
+                    best_idx_combined = np.argmin(valid_combined_perf)
+                    best_rmse_history.append(valid_combined_perf[best_idx_combined])
+                    best_complexity_history.append(combined_comp[best_idx_combined])
+                else:
+                    best_rmse_history.append(float('inf'))
+                    best_complexity_history.append(float('inf'))
+
+            end_time = time.time()
+            print(f'\n第 {run_id + 1} 次优化完成!总耗时: {end_time - start_time:.2f} 秒')
+
+            # 选择最优个体
+            final_pareto = all_pareto_fronts[-1]
+            if final_pareto['num_solutions'] > 0:
+                perf_vals = final_pareto['performance']
+                comp_vals = final_pareto['complexity']
+                valid_mask = np.isfinite(perf_vals) & np.isfinite(comp_vals)
+                if valid_mask.any():
+                    perf_vals = perf_vals[valid_mask]
+                    comp_vals = comp_vals[valid_mask]
+                    params = [final_pareto['params'][i] for i in range(len(valid_mask)) if valid_mask[i]]
+                    normalized_perf = (perf_vals - perf_vals.min()) / (perf_vals.max() - perf_vals.min() + 1e-10)
+                    normalized_comp = (comp_vals - comp_vals.min()) / (comp_vals.max() - comp_vals.min() + 1e-10)
+                    trade_off_scores = np.sqrt(normalized_perf ** 2 + normalized_comp ** 2)
+                    best_idx = np.argmin(trade_off_scores)
+                    best_individual = params[best_idx]
+                else:
+                    raise ValueError("最后一代没有有效解")
+            else:
+                all_perf = np.concatenate([pf['performance'] for pf in all_pareto_fronts])
+                all_params = [p for pf in all_pareto_fronts for p in pf['params']]
+                valid_mask = np.isfinite(all_perf)
+                if valid_mask.any():
+                    best_idx = np.argmin(all_perf[valid_mask])
+                    best_individual = np.array(all_params)[valid_mask][best_idx]
+                else:
+                    raise ValueError("所有个体评估均失败!")
+
+            topo, cnn_params, lstm_params, setting = decode_individual(best_individual)
+            batch_size, learn_rate, opt_type, reg_type = decode_hyperparams(setting)
+
+            print(f'\n第 {run_id + 1} 次运行最终优化的超参数数值:')
+            print(f' batch_size: {batch_size}')
+            print(f' learning_rate: {learn_rate:.6f}')
+            print(f' optimizer: {opt_type}')
+            print(f' regularizer: {reg_type}')
+
+            print('\n训练最终模型...')
+            model = HybridCNNBiLSTM(topo, cnn_params, lstm_params, num_features, SEQUENCE_LENGTH).to(DEVICE)
+            if torch.cuda.device_count() > 1:
+                model = nn.DataParallel(model)
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size)
+            criterion = nn.MSELoss()
+
+            if opt_type == 'Adam':
+                optimizer = optim.Adam(model.parameters(), lr=learn_rate)
+            elif opt_type == 'SGD':
+                optimizer = optim.SGD(model.parameters(), lr=learn_rate, momentum=0.9)
+            elif opt_type == 'RMSprop':
+                optimizer = optim.RMSprop(model.parameters(), lr=learn_rate)
+            else:
+                optimizer = optim.Adadelta(model.parameters(), lr=learn_rate)
+
+            train_losses = []
+            val_losses = []
+            best_val_loss = float('inf')
+            patience_counter = 0
+
+            for epoch in range(FINAL_EPOCHS):
+                model.train()
+                train_loss = 0
+                for inputs, targets in train_loader:
+                    inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+                    optimizer.zero_grad()
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
+
+                    if reg_type is not None:
+                        l1_penalty = torch.tensor(0., device=DEVICE)
+                        l2_penalty = torch.tensor(0., device=DEVICE)
+                        for name, param in model.named_parameters():
+                            if 'bias' in name or 'bn' in name:
+                                continue
+                            if reg_type in ['L1', 'L1L2']:
+                                l1_penalty += torch.norm(param, 1)
+                            if reg_type in ['L2', 'L1L2']:
+                                l2_penalty += torch.norm(param, 2)
+                        loss += LAMBDA_REG * (l1_penalty + l2_penalty)
+
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRADIENT_CLIP)
+                    optimizer.step()
+                    train_loss += loss.item()
+
+                model.eval()
+                val_loss = 0
+                val_samples = 0
+                with torch.no_grad():
+                    for inputs, targets in val_loader:
+                        inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+                        outputs = model(inputs)
+                        batch_loss = criterion(outputs, targets).item() * inputs.size(0)
+                        val_loss += batch_loss
+                        val_samples += inputs.size(0)
+                if val_samples > 0:
+                    val_loss /= val_samples
+                train_losses.append(train_loss / len(train_loader))
+                val_losses.append(val_loss)
+
+                if (epoch + 1) % 5 == 0:
+                    print(f'  Epoch {epoch + 1}/{FINAL_EPOCHS}, 训练损失: {train_loss / len(train_loader):.6f}, 验证损失: {val_loss:.6f}')
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                if patience_counter >= FINAL_PATIENCE:
+                    print(f'早停于 epoch {epoch + 1}')
+                    break
+
+            # 绘制训练损失曲线
+            print('\n正在绘制训练损失曲线...')
+            plt.figure(figsize=(12, 8))
+            epochs_range = range(1, len(train_losses) + 1)
+            plt.plot(epochs_range, train_losses, 'b-', linewidth=2, label='训练损失', alpha=0.8)
+            plt.plot(epochs_range, val_losses, 'r--', linewidth=2, label='验证损失', alpha=0.8)
+            plt.xlabel('训练轮次 (Epoch)', fontsize=14)
+            plt.ylabel('损失值 (MSE)', fontsize=14)
+            plt.title('模型训练过程损失曲线', fontsize=16, fontweight='bold')
+            plt.legend(fontsize=12, loc='best')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(f'{prefix}training_loss_curve.png', dpi=300, bbox_inches='tight')
+            plt.show()
+
+            # 评估最终模型
+            model.eval()
+            all_test_targets = []
+            all_test_outputs = []
             with torch.no_grad():
-                for inputs, targets in val_loader:
+                for inputs, targets in test_loader:
                     inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
                     outputs = model(inputs)
-                    batch_loss = criterion(outputs, targets).item() * inputs.size(0)
-                    val_loss += batch_loss
-                    val_samples += inputs.size(0)
-            if val_samples > 0:
-                val_loss /= val_samples
-            train_losses.append(train_loss / len(train_loader))
-            val_losses.append(val_loss)
+                    all_test_targets.extend(targets.cpu().numpy())
+                    all_test_outputs.extend(outputs.cpu().numpy())
+            all_test_targets = np.array(all_test_targets) * (max_speed - min_speed) + min_speed
+            all_test_outputs = np.array(all_test_outputs) * (max_speed - min_speed) + min_speed
+            all_test_targets = all_test_targets.flatten()
+            all_test_outputs = all_test_outputs.flatten()
 
-            if (epoch + 1) % 5 == 0:
-                print(f'  Epoch {epoch + 1}/{FINAL_EPOCHS}, 训练损失: {train_loss / len(train_loader):.6f}, 验证损失: {val_loss:.6f}')
+            mae_test = mean_absolute_error(all_test_targets, all_test_outputs)
+            rmse_test = np.sqrt(mean_squared_error(all_test_targets, all_test_outputs))
+            mape_test = np.mean(np.abs((all_test_targets - all_test_outputs) / all_test_targets)) * 100
+            r2_test = r2_score(all_test_targets, all_test_outputs)
+            r_test = pearsonr(all_test_targets, all_test_outputs)[0]
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-            if patience_counter >= FINAL_PATIENCE:
-                print(f'早停于 epoch {epoch + 1}')
-                break
+            print(f'\n第 {run_id + 1} 次运行测试集最终性能:')
+            print(f'  MAE: {mae_test:.4f} m/s')
+            print(f'  RMSE: {rmse_test:.4f} m/s')
+            print(f'  MAPE: {mape_test:.2f}%')
+            print(f'  R²: {r2_test:.4f}')
+            print(f'  相关系数: {r_test:.4f}')
 
-        # 绘制训练损失曲线
-        print('\n正在绘制训练损失曲线...')
-        plt.figure(figsize=(12, 8))
-        epochs_range = range(1, len(train_losses) + 1)
-        plt.plot(epochs_range, train_losses, 'b-', linewidth=2, label='训练损失', alpha=0.8)
-        plt.plot(epochs_range, val_losses, 'r--', linewidth=2, label='验证损失', alpha=0.8)
-        plt.xlabel('训练轮次 (Epoch)', fontsize=14)
-        plt.ylabel('损失值 (MSE)', fontsize=14)
-        plt.title('模型训练过程损失曲线', fontsize=16, fontweight='bold')
-        plt.legend(fontsize=12, loc='best')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(f'{prefix}training_loss_curve.png', dpi=300, bbox_inches='tight')
-        plt.show()
+            test_performance = {'mae': mae_test, 'rmse': rmse_test, 'mape': mape_test}
 
-        # 评估最终模型
-        model.eval()
-        all_test_targets = []
-        all_test_outputs = []
-        with torch.no_grad():
-            for inputs, targets in test_loader:
-                inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
-                outputs = model(inputs)
-                all_test_targets.extend(targets.cpu().numpy())
-                all_test_outputs.extend(outputs.cpu().numpy())
-        all_test_targets = np.array(all_test_targets) * (max_speed - min_speed) + min_speed
-        all_test_outputs = np.array(all_test_outputs) * (max_speed - min_speed) + min_speed
-        all_test_targets = all_test_targets.flatten()
-        all_test_outputs = all_test_outputs.flatten()
+            # Pareto前沿演化图
+            print('\n正在绘制 Pareto 前沿演化图...')
+            plt.figure(figsize=(12, 8))
+            colors = plt.cm.viridis(np.linspace(0, 1, len(all_pareto_fronts)))
+            for idx, pf in enumerate(all_pareto_fronts):
+                if pf['num_solutions'] > 0:
+                    perf = pf['performance']
+                    comp = pf['complexity']
+                    valid_mask = np.isfinite(perf) & np.isfinite(comp)
+                    if np.any(valid_mask):
+                        plt.scatter(comp[valid_mask], perf[valid_mask], c=[colors[idx]], s=60, alpha=0.6,
+                                    label=f'第 {pf["generation"]} 代', edgecolors='k', linewidth=0.5)
+            plt.xlabel('模型复杂度 (参数数量)', fontsize=14)
+            plt.ylabel('验证集 RMSE (m/s)', fontsize=14)
+            plt.title('NSGA-II Pareto 前沿演化过程', fontsize=16)
+            plt.legend(fontsize=10, loc='upper right')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(f'{prefix}pareto_evolution_continuous_lr.png', dpi=300, bbox_inches='tight')
+            plt.show()
 
-        mae_test = mean_absolute_error(all_test_targets, all_test_outputs)
-        rmse_test = np.sqrt(mean_squared_error(all_test_targets, all_test_outputs))
-        mape_test = np.mean(np.abs((all_test_targets - all_test_outputs) / all_test_targets)) * 100
-        r2_test = r2_score(all_test_targets, all_test_outputs)
-        r_test = pearsonr(all_test_targets, all_test_outputs)[0]
-
-        print(f'\n第 {run_id + 1} 次运行测试集最终性能:')
-        print(f'  MAE: {mae_test:.4f} m/s')
-        print(f'  RMSE: {rmse_test:.4f} m/s')
-        print(f'  MAPE: {mape_test:.2f}%')
-        print(f'  R²: {r2_test:.4f}')
-        print(f'  相关系数: {r_test:.4f}')
-
-        test_performance = {'mae': mae_test, 'rmse': rmse_test, 'mape': mape_test}
-
-        # Pareto前沿演化图
-        print('\n正在绘制 Pareto 前沿演化图...')
-        plt.figure(figsize=(12, 8))
-        colors = plt.cm.viridis(np.linspace(0, 1, len(all_pareto_fronts)))
-        for idx, pf in enumerate(all_pareto_fronts):
-            if pf['num_solutions'] > 0:
+            # 关键代数Pareto前沿对比图（带连接线）
+            print('\n正在绘制关键代数Pareto前沿对比图（带连接线）...')
+            target_generations = [1, 5, 10, 20, 25, 30]
+            plt.figure(figsize=(14, 10))
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+            markers = ['o', 's', '^', 'D', 'v', 'p']
+            plotted_any = False
+            for idx, target_gen in enumerate(target_generations):
+                pf = None
+                for front in all_pareto_fronts:
+                    if front['generation'] == target_gen:
+                        pf = front
+                        break
+                if pf is None or pf['num_solutions'] == 0:
+                    continue
                 perf = pf['performance']
                 comp = pf['complexity']
                 valid_mask = np.isfinite(perf) & np.isfinite(comp)
-                if np.any(valid_mask):
-                    plt.scatter(comp[valid_mask], perf[valid_mask], c=[colors[idx]], s=60, alpha=0.6,
-                                label=f'第 {pf["generation"]} 代', edgecolors='k', linewidth=0.5)
-        plt.xlabel('模型复杂度 (参数数量)', fontsize=14)
-        plt.ylabel('验证集 RMSE (m/s)', fontsize=14)
-        plt.title('NSGA-II Pareto 前沿演化过程', fontsize=16)
-        plt.legend(fontsize=10, loc='upper right')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(f'{prefix}pareto_evolution_continuous_lr.png', dpi=300, bbox_inches='tight')
-        plt.show()
-
-        # 关键代数Pareto前沿对比图（带连接线）
-        print('\n正在绘制关键代数Pareto前沿对比图（带连接线）...')
-        target_generations = [1, 5, 10, 20, 25, 30]
-        plt.figure(figsize=(14, 10))
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-        markers = ['o', 's', '^', 'D', 'v', 'p']
-        plotted_any = False
-        for idx, target_gen in enumerate(target_generations):
-            pf = None
-            for front in all_pareto_fronts:
-                if front['generation'] == target_gen:
-                    pf = front
-                    break
-            if pf is None or pf['num_solutions'] == 0:
-                continue
-            perf = pf['performance']
-            comp = pf['complexity']
-            valid_mask = np.isfinite(perf) & np.isfinite(comp)
-            if not np.any(valid_mask):
-                continue
-            perf = perf[valid_mask]
-            comp = comp[valid_mask]
-            sort_idx = np.argsort(comp)
-            comp_sorted = comp[sort_idx]
-            perf_sorted = perf[sort_idx]
-            plt.plot(comp_sorted, perf_sorted, color=colors[idx], linewidth=2, alpha=0.7,
-                     label=f'第 {target_gen} 代 (n={len(perf)})')
-            plt.scatter(comp, perf, c=colors[idx], marker=markers[idx], s=80, alpha=0.9,
-                        edgecolors='black', linewidth=0.5)
-            plotted_any = True
-        if plotted_any:
-            plt.xlabel('模型复杂度 (参数数量)', fontsize=14)
-            plt.ylabel('验证集 RMSE (m/s)', fontsize=14)
-            plt.title('NSGA-II Pareto前沿进化过程对比（带连接线）', fontsize=16, fontweight='bold')
-            plt.legend(fontsize=11, loc='upper right')
-            plt.grid(True, alpha=0.3)
-            plt.figtext(0.5, 0.02,
-                        '注：第1代为初始种群，第30代为最终进化结果\n每条实线连接该代的所有Pareto最优解，展示前沿面形状',
-                        ha='center', fontsize=10, style='italic')
-            plt.tight_layout(rect=[0, 0.05, 1, 0.96])
-            plt.savefig(f'{prefix}pareto_evolution_comparison_connected.png', dpi=300, bbox_inches='tight')
-        plt.show()
-
-        # 最终代Pareto前沿详细图
-        print('\n正在绘制最终代Pareto前沿详细图（第30代）...')
-        final_pf = None
-        for pf in all_pareto_fronts:
-            if pf['generation'] == 30:
-                final_pf = pf
-                break
-        if final_pf and final_pf['num_solutions'] > 0:
-            perf_final = final_pf['performance']
-            comp_final = final_pf['complexity']
-            valid_final = np.isfinite(perf_final) & np.isfinite(comp_final)
-            if np.any(valid_final):
-                perf_final = perf_final[valid_final]
-                comp_final = comp_final[valid_final]
-                sort_idx = np.argsort(comp_final)
-                comp_sorted = comp_final[sort_idx]
-                perf_sorted = perf_final[sort_idx]
-                plt.figure(figsize=(12, 8))
-                plt.plot(comp_sorted, perf_sorted, color='darkred', linewidth=3, alpha=0.8,
-                         marker='o', markersize=10, markerfacecolor='red',
-                         markeredgecolor='black', markeredgewidth=1.5)
+                if not np.any(valid_mask):
+                    continue
+                perf = perf[valid_mask]
+                comp = comp[valid_mask]
+                sort_idx = np.argsort(comp)
+                comp_sorted = comp[sort_idx]
+                perf_sorted = perf[sort_idx]
+                plt.plot(comp_sorted, perf_sorted, color=colors[idx], linewidth=2, alpha=0.7,
+                         label=f'第 {target_gen} 代 (n={len(perf)})')
+                plt.scatter(comp, perf, c=colors[idx], marker=markers[idx], s=80, alpha=0.9,
+                            edgecolors='black', linewidth=0.5)
+                plotted_any = True
+            if plotted_any:
                 plt.xlabel('模型复杂度 (参数数量)', fontsize=14)
                 plt.ylabel('验证集 RMSE (m/s)', fontsize=14)
-                plt.title('最终Pareto前沿（第30代）', fontsize=16, fontweight='bold')
+                plt.title('NSGA-II Pareto前沿进化过程对比（带连接线）', fontsize=16, fontweight='bold')
+                plt.legend(fontsize=11, loc='upper right')
                 plt.grid(True, alpha=0.3)
-                for i, (comp_val, perf_val) in enumerate(zip(comp_sorted, perf_sorted)):
-                    plt.annotate(f'({comp_val:.0f}, {perf_val:.3f})', xy=(comp_val, perf_val),
-                                 xytext=(5, 5), textcoords='offset points', fontsize=9, alpha=0.7)
-                plt.tight_layout()
-                plt.savefig(f'{prefix}pareto_front_final_gen30.png', dpi=300, bbox_inches='tight')
-                plt.show()
+                plt.figtext(0.5, 0.02,
+                            '注：第1代为初始种群，第30代为最终进化结果\n每条实线连接该代的所有Pareto最优解，展示前沿面形状',
+                            ha='center', fontsize=10, style='italic')
+                plt.tight_layout(rect=[0, 0.05, 1, 0.96])
+                plt.savefig(f'{prefix}pareto_evolution_comparison_connected.png', dpi=300, bbox_inches='tight')
+            plt.show()
 
-        # 保存结果
-        with open(f'{prefix}modeo_cnn_optimization_continuous_lr.pkl', 'wb') as f:
-            pickle.dump({
-                'best_individual': best_individual,
-                'best_rmse_history': best_rmse_history,
-                'pareto_fronts': all_pareto_fronts,
-                'test_performance': test_performance,
-                'training_losses': train_losses,
-                'validation_losses': val_losses,
-                'model_params': {
+            # 最终代Pareto前沿详细图
+            print('\n正在绘制最终代Pareto前沿详细图（第30代）...')
+            final_pf = None
+            for pf in all_pareto_fronts:
+                if pf['generation'] == 30:
+                    final_pf = pf
+                    break
+            if final_pf and final_pf['num_solutions'] > 0:
+                perf_final = final_pf['performance']
+                comp_final = final_pf['complexity']
+                valid_final = np.isfinite(perf_final) & np.isfinite(comp_final)
+                if np.any(valid_final):
+                    perf_final = perf_final[valid_final]
+                    comp_final = comp_final[valid_final]
+                    sort_idx = np.argsort(comp_final)
+                    comp_sorted = comp_final[sort_idx]
+                    perf_sorted = perf_final[sort_idx]
+                    plt.figure(figsize=(12, 8))
+                    plt.plot(comp_sorted, perf_sorted, color='darkred', linewidth=3, alpha=0.8,
+                             marker='o', markersize=10, markerfacecolor='red',
+                             markeredgecolor='black', markeredgewidth=1.5)
+                    plt.xlabel('模型复杂度 (参数数量)', fontsize=14)
+                    plt.ylabel('验证集 RMSE (m/s)', fontsize=14)
+                    plt.title('最终Pareto前沿（第30代）', fontsize=16, fontweight='bold')
+                    plt.grid(True, alpha=0.3)
+                    for i, (comp_val, perf_val) in enumerate(zip(comp_sorted, perf_sorted)):
+                        plt.annotate(f'({comp_val:.0f}, {perf_val:.3f})', xy=(comp_val, perf_val),
+                                     xytext=(5, 5), textcoords='offset points', fontsize=9, alpha=0.7)
+                    plt.tight_layout()
+                    plt.savefig(f'{prefix}pareto_front_final_gen30.png', dpi=300, bbox_inches='tight')
+                    plt.show()
+
+            # 保存结果
+            with open(f'{prefix}modeo_cnn_optimization_continuous_lr.pkl', 'wb') as f:
+                pickle.dump({
+                    'best_individual': best_individual,
+                    'best_rmse_history': best_rmse_history,
+                    'pareto_fronts': all_pareto_fronts,
+                    'test_performance': test_performance,
+                    'training_losses': train_losses,
+                    'validation_losses': val_losses,
+                    'model_params': {
+                        'topo': topo,
+                        'cnn_params': cnn_params,
+                        'lstm_params': lstm_params,
+                        'setting': setting,
+                        'batch_size': batch_size,
+                        'learn_rate': learn_rate,
+                        'opt_type': opt_type
+                    },
+                    'run_id': run_id + 1,
+                }, f)
+
+            # ====== 新增: 保存模型 checkpoint ======
+            if args.save_model is not None:
+                save_path = args.save_model
+                os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+                torch.save({
+                    'model_state_dict': model.state_dict(),
                     'topo': topo,
                     'cnn_params': cnn_params,
                     'lstm_params': lstm_params,
                     'setting': setting,
-                    'batch_size': batch_size,
-                    'learn_rate': learn_rate,
-                    'opt_type': opt_type
-                },
-                'run_id': run_id + 1,
-            }, f)
+                }, save_path)
+                print(f"\n>>> 模型 checkpoint 已保存至: {save_path}")
 
-        # 生成综合报告
-        report_metrics = generate_comprehensive_report(
-            model, test_loader, val_loader, DEVICE, min_speed, max_speed,
-            all_pareto_fronts, feature_columns, topo, cnn_params, lstm_params, setting,
-            test_performance, r_test, save_prefix=prefix
-        )
+            # 生成综合报告
+            report_metrics = generate_comprehensive_report(
+                model, test_loader, val_loader, DEVICE, min_speed, max_speed,
+                all_pareto_fronts, feature_columns, topo, cnn_params, lstm_params, setting,
+                test_performance, r_test, save_prefix=prefix
+            )
 
-        # 保存测试结果CSV
-        print('\n========== 代码运行结束后保存文件 ==========')
-        test_results_df = pd.DataFrame({
-            '真实风速 (m/s)': all_test_targets,
-            '预测风速 (m/s)': all_test_outputs
-        })
-        test_results_df.to_csv(f'{prefix}test_set_wind_speed_predictions.csv', index=False, encoding='utf-8-sig')
+            # 保存测试结果CSV
+            print('\n========== 代码运行结束后保存文件 ==========')
+            test_results_df = pd.DataFrame({
+                '真实风速 (m/s)': all_test_targets,
+                '预测风速 (m/s)': all_test_outputs
+            })
+            test_results_df.to_csv(f'{prefix}test_set_wind_speed_predictions.csv', index=False, encoding='utf-8-sig')
 
-        # 保存每代Pareto前沿CSV
-        for pf in all_pareto_fronts:
-            gen = pf['generation']
-            perf = pf['performance']
-            comp = pf['complexity']
-            valid_mask = np.isfinite(perf) & np.isfinite(comp)
-            if np.any(valid_mask):
-                pareto_df = pd.DataFrame({
-                    '模型复杂度 (参数数量)': comp[valid_mask],
-                    '验证集RMSE (m/s)': perf[valid_mask]
-                })
-                pareto_df = pareto_df.sort_values(by='模型复杂度 (参数数量)')
-                filename = f'{prefix}pareto_front_generation_{gen}.csv'
-                pareto_df.to_csv(filename, index=False, encoding='utf-8-sig')
+            # 保存每代Pareto前沿CSV
+            for pf in all_pareto_fronts:
+                gen = pf['generation']
+                perf = pf['performance']
+                comp = pf['complexity']
+                valid_mask = np.isfinite(perf) & np.isfinite(comp)
+                if np.any(valid_mask):
+                    pareto_df = pd.DataFrame({
+                        '模型复杂度 (参数数量)': comp[valid_mask],
+                        '验证集RMSE (m/s)': perf[valid_mask]
+                    })
+                    pareto_df = pareto_df.sort_values(by='模型复杂度 (参数数量)')
+                    filename = f'{prefix}pareto_front_generation_{gen}.csv'
+                    pareto_df.to_csv(filename, index=False, encoding='utf-8-sig')
+        # ====== 新增: if/else 块结束 ======
 
         # ==================== LBA Attack Phase ====================
         if not args.no_attack:
