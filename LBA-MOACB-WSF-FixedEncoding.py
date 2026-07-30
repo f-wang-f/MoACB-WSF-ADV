@@ -1,24 +1,34 @@
 """
-MoACB-WSF with LBA Adversarial Attack Integration
-=================================================
-Multi-Objective Automated CNN-BiLSTM for Wind Speed Forecasting
-with Learning-Based Adversarial Attack Evaluation
+LBA-MOACB-WSF with Fixed Manual Encoding
+========================================
+基于论文给出的最佳折中混合编码向量直接构建 CNN-BiLSTM 风速预测模型，
+跳过 NSGA-II 进化搜索，直接训练目标模型并执行 LBA/nVITA 对抗攻击评估。
 
-说明：MoACB-WSF 主体代码完全保留，仅修正 LBA 对抗攻击模块
+说明：本文件代码结构与 LBA-MOACB-WSF.py 保持一致，仅将 NSGA-II 模型搜索替换为固定编码。
+- 编码向量：论文表 "BEST TRADE-OFF HYBRID ENCODING VECTORS OBTAINED BY THE PROPOSED MoACB-WSF"
 - nVITA：标准 DE/rand/1/bin 差分进化稀疏黑盒攻击
 - LBA：双分支CNN学习攻击模式，支持扰动特征数量约束
-"""
-""
-## 第一次运行：训练并保存模型
-#python LBA-MOACB-WSF.py --save_model output/best_model.pt
 
-# 后续消融实验：加载模型，仅跑攻击评估（跳过搜索和训练）
-#python LBA-MOACB-WSF.py --load_model output/best_model.pt --perturb_mask "0010"
-#python LBA-MOACB-WSF.py --load_model output/best_model.pt --perturb_mask "1111" --feat_constraint 2
+原文件 LBA-MOACB-WSF.py 完全保留，两个文件并存。
+"""
+
+## 编码来源（Sotavento 10-min Dataset）
+# Topo:    [1,1,1,1,0,0,0,0,0,0]
+# CNN:     [[0,0,1,0,1], [1,3,4,1,1], [3,0,3,1,1]]
+# BiLSTM:  [[0,0,7,1,0], [0,0,0,1,2]]
+# Setting: [0, 0, 0.0072, 3]
+
+## 第一次运行：训练固定编码模型并保存
+#python LBA-MOACB-WSF-FixedEncoding.py --save_model output/fixed_encoding_model.pt
+
+# 后续消融实验：加载模型，仅跑攻击评估（跳过训练）
+#python LBA-MOACB-WSF-FixedEncoding.py --load_model output/fixed_encoding_model.pt --perturb_mask "0010"
+#python LBA-MOACB-WSF-FixedEncoding.py --load_model output/fixed_encoding_model.pt --perturb_mask "1111" --feat_constraint 2
 
 import os
 import sys
 import ast
+import json
 import random
 import time
 import warnings
@@ -123,6 +133,23 @@ LBA_CONFIG = {
                              # 例如'0010'表示只扰动第3个特征(0-based索引2)
                              # '1111'表示扰动所有4个特征
     'feature_constraint': None,  # 扰动特征数量约束 (None=不限制, 整数=限定特征数)
+}
+
+# ==================== FIXED MANUAL ENCODING FROM PAPER ====================
+# 论文表 "BEST TRADE-OFF HYBRID ENCODING VECTORS OBTAINED BY THE PROPOSED MoACB-WSF"
+# Dataset: Sotavento 10-min Dataset
+FIXED_ENCODING = {
+    'topo': [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+    'cnn_params': [
+        [0, 0, 1, 0, 1],   # CNN module 0
+        [1, 3, 4, 1, 1],   # CNN module 1
+        [3, 0, 3, 1, 1],   # CNN module 2
+    ],
+    'lstm_params': [
+        [0, 0, 7, 1, 0],   # BiLSTM module 0 (module index 3)
+        [0, 0, 0, 1, 2],   # BiLSTM module 1 (module index 4)
+    ],
+    'setting': [0, 0, 0.0072, 3],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
 }
 
 
@@ -1746,7 +1773,7 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
 # =============================================================================
 
 def generate_comprehensive_report(model, test_loader, val_loader, device, min_speed, max_speed,
-                                  all_pareto_fronts, feature_columns, topo, cnn_params, lstm_params,
+                                  feature_columns, topo, cnn_params, lstm_params,
                                   setting, test_performance, r_test, save_prefix=''):
     print('\n========== 生成综合预测报告 ==========')
     model.eval()
@@ -1828,18 +1855,18 @@ def generate_comprehensive_report(model, test_loader, val_loader, device, min_sp
     ax4.grid(True, alpha=0.3)
 
     ax5 = plt.subplot(2, 3, 5)
-    final_pareto = all_pareto_fronts[-1]
-    if final_pareto['num_solutions'] > 0:
-        perf_vals = final_pareto['performance']
-        comp_vals = final_pareto['complexity']
-        valid_mask = np.isfinite(perf_vals) & np.isfinite(comp_vals)
-        if np.any(valid_mask):
-            ax5.scatter(comp_vals[valid_mask], perf_vals[valid_mask], c='darkgreen', s=100,
-                        edgecolors='black', linewidth=1, alpha=0.8)
-    ax5.set_xlabel('模型复杂度 (参数数量)', fontsize=12)
-    ax5.set_ylabel('验证集 RMSE (m/s)', fontsize=12)
-    ax5.set_title('最后一代Pareto前沿', fontsize=14)
-    ax5.grid(True, alpha=0.3)
+    ax5.axis('off')
+    info_text = (
+        f"固定编码配置\n"
+        f"topo: {topo}\n"
+        f"CNN: {cnn_params}\n"
+        f"BiLSTM: {lstm_params}\n"
+        f"Setting: {setting}"
+    )
+    ax5.text(0.5, 0.5, info_text, transform=ax5.transAxes, fontsize=11,
+             verticalalignment='center', horizontalalignment='center',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    ax5.set_title('固定编码配置', fontsize=14)
 
     ax6 = plt.subplot(2, 3, 6)
     metrics = ['RMSE', 'MAE', 'MAPE', 'R']
@@ -1920,8 +1947,26 @@ def main():
                         help='Path to save the trained model checkpoint (model weights + architecture params)')
     parser.add_argument('--load_model', type=str, default=None,
                         help='Path to load a pre-trained model checkpoint (skip NSGA-II search and training)')
+    parser.add_argument('--encoding_config', type=str, default=None,
+                        help='自定义编码配置文件(JSON)，包含 topo/cnn_params/lstm_params/setting；不指定则使用论文固定编码')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     args = parser.parse_args()
+
+    # 加载自定义编码配置（二选一：直接输入编码 or 使用论文固定编码）
+    def load_encoding_config(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        required = {'topo', 'cnn_params', 'lstm_params', 'setting'}
+        missing = required - set(cfg.keys())
+        if missing:
+            raise ValueError(f"编码配置缺少字段: {missing}")
+        return cfg
+
+    if args.encoding_config is not None:
+        encoding = load_encoding_config(args.encoding_config)
+        print(f"\n>>> 已加载自定义编码配置: {args.encoding_config}")
+    else:
+        encoding = FIXED_ENCODING
     
     # 使用配置文件中的参数作为默认值
     if args.perturb_mask is None:
@@ -1950,11 +1995,15 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     print(f"\n{'=' * 80}")
-    print("MoACB-WSF: Multi-Objective Automated CNN-BiLSTM for Wind Speed Forecasting")
-    print("with Learning-Based Adversarial Attack (LBA) Integration")
+    print("固定编码 MoACB-WSF: 直接构建论文最佳折中模型并执行 LBA 对抗攻击")
     print(f"{'=' * 80}")
     print(f"Device: {DEVICE}")
     print(f"Data file: {args.data_file}")
+    print(f"\n当前使用的编码向量:")
+    print(f"  topo:    {encoding['topo']}")
+    print(f"  CNN:     {encoding['cnn_params']}")
+    print(f"  BiLSTM:  {encoding['lstm_params']}")
+    print(f"  Setting: {encoding['setting']}")
 
     # Load data
     data_result = load_and_preprocess_data(args.data_file)
@@ -1976,13 +2025,13 @@ def main():
     load_model_mode = args.load_model is not None and os.path.isfile(args.load_model)
     if load_model_mode:
         print(f"\n>>> 检测到 --load_model 路径: {args.load_model}")
-        print(">>> 将跳过 NSGA-II 搜索和最终训练，直接加载已训练模型进行攻击评估。")
+        print(">>> 将跳过模型训练，直接加载已训练模型进行攻击评估。")
         # 加载模型模式下，NUM_RUNS 循环只执行 1 次
         actual_num_runs = 1
     else:
         if args.load_model is not None and not os.path.isfile(args.load_model):
             print(f"\n>>> 警告: --load_model 指定的文件不存在: {args.load_model}")
-            print(">>> 将按正常流程执行 NSGA-II 搜索和训练。")
+            print(">>> 将按正常流程使用固定编码训练模型。")
         actual_num_runs = NUM_RUNS
 
     for run_id in range(actual_num_runs):
@@ -2020,109 +2069,30 @@ def main():
             print(f'    regularizer: {reg_type}')
 
             # 为后续兼容：初始化占位变量（加载模式下不使用）
-            all_pareto_fronts = []
             train_losses, val_losses = [], []
             test_performance = {}
-            best_individual = None
         else:
-            # ---------- 正常流程: NSGA-II 搜索 + 最终训练 ----------
-            print('\n========== 开始NSGA-II优化自动化深度学习模型 ==========')
-            start_time = time.time()
+            # ---------- 固定编码流程: 直接构建模型并训练 ----------
+            print('\n========== 使用固定编码构建并训练模型 ==========')
 
-            population = initialize_population(POP_SIZE, train_dataset)
-            print(f'初始化完成,种群大小: {len(population)}')
+            topo = encoding['topo']
+            cnn_params = encoding['cnn_params']
+            lstm_params = encoding['lstm_params']
+            setting = encoding['setting']
+            best_individual = encode_individual(topo, cnn_params, lstm_params, setting)
 
-            best_rmse_history = []
-            best_complexity_history = []
-            all_pareto_fronts = []
+            if not is_valid_individual(best_individual):
+                raise ValueError("固定编码的拓扑结构不合法: 存在没有输入连接的模块")
 
-            for gen in range(MAX_GEN):
-                print(f'\n第 {gen + 1}/{MAX_GEN} 代...')
-                performance, complexity = evaluate_population(
-                    population, train_dataset, val_dataset, min_speed, max_speed,
-                    num_features, SEQUENCE_LENGTH, DEVICE
-                )
-                fronts, rank = fast_non_dominated_sort(performance, complexity)
-                distance = crowding_distance(performance, complexity, fronts)
-                mating_pool = tournament_selection(population, rank, distance, POP_SIZE)
-                offspring = crossover_population(mating_pool)
-                mutated_offspring = []
-                for child in offspring:
-                    if np.random.random() < MUTATION_PROB:
-                        mutated_child = variable_length_mutation(child)
-                        mutated_offspring.append(mutated_child)
-                    else:
-                        mutated_offspring.append(child.copy())
-                offspring_perf, offspring_comp = evaluate_population(
-                    mutated_offspring, train_dataset, val_dataset, min_speed, max_speed,
-                    num_features, SEQUENCE_LENGTH, DEVICE
-                )
-                combined_pop = population + mutated_offspring
-                combined_perf = np.concatenate([performance, offspring_perf])
-                combined_comp = np.concatenate([complexity, offspring_comp])
-                combined_fronts, combined_rank = fast_non_dominated_sort(combined_perf, combined_comp)
-                combined_dist = crowding_distance(combined_perf, combined_comp, combined_fronts)
-                population, performance, complexity = environmental_selection(
-                    combined_pop, combined_perf, combined_comp, combined_rank, combined_dist, POP_SIZE
-                )
-                pareto_front = {
-                    'params': [combined_pop[i] for i in combined_fronts[0]],
-                    'performance': combined_perf[combined_fronts[0]],
-                    'complexity': combined_comp[combined_fronts[0]],
-                    'num_solutions': len(combined_fronts[0]),
-                    'generation': gen + 1
-                }
-                all_pareto_fronts.append(pareto_front)
-
-                valid_combined_perf = combined_perf[np.isfinite(combined_perf)]
-                if len(valid_combined_perf) > 0:
-                    best_idx_combined = np.argmin(valid_combined_perf)
-                    best_rmse_history.append(valid_combined_perf[best_idx_combined])
-                    best_complexity_history.append(combined_comp[best_idx_combined])
-                else:
-                    best_rmse_history.append(float('inf'))
-                    best_complexity_history.append(float('inf'))
-
-            end_time = time.time()
-            print(f'\n第 {run_id + 1} 次优化完成!总耗时: {end_time - start_time:.2f} 秒')
-
-            # 选择最优个体
-            final_pareto = all_pareto_fronts[-1]
-            if final_pareto['num_solutions'] > 0:
-                perf_vals = final_pareto['performance']
-                comp_vals = final_pareto['complexity']
-                valid_mask = np.isfinite(perf_vals) & np.isfinite(comp_vals)
-                if valid_mask.any():
-                    perf_vals = perf_vals[valid_mask]
-                    comp_vals = comp_vals[valid_mask]
-                    params = [final_pareto['params'][i] for i in range(len(valid_mask)) if valid_mask[i]]
-                    normalized_perf = (perf_vals - perf_vals.min()) / (perf_vals.max() - perf_vals.min() + 1e-10)
-                    normalized_comp = (comp_vals - comp_vals.min()) / (comp_vals.max() - comp_vals.min() + 1e-10)
-                    trade_off_scores = np.sqrt(normalized_perf ** 2 + normalized_comp ** 2)
-                    best_idx = np.argmin(trade_off_scores)
-                    best_individual = params[best_idx]
-                else:
-                    raise ValueError("最后一代没有有效解")
-            else:
-                all_perf = np.concatenate([pf['performance'] for pf in all_pareto_fronts])
-                all_params = [p for pf in all_pareto_fronts for p in pf['params']]
-                valid_mask = np.isfinite(all_perf)
-                if valid_mask.any():
-                    best_idx = np.argmin(all_perf[valid_mask])
-                    best_individual = np.array(all_params)[valid_mask][best_idx]
-                else:
-                    raise ValueError("所有个体评估均失败!")
-
-            topo, cnn_params, lstm_params, setting = decode_individual(best_individual)
             batch_size, learn_rate, opt_type, reg_type = decode_hyperparams(setting)
 
-            print(f'\n第 {run_id + 1} 次运行最终优化的混合编码向量:')
+            print(f'\n第 {run_id + 1} 次运行使用的固定编码向量:')
             print(f'  topo:    {topo}')
             print(f'  CNN:     {cnn_params}')
             print(f'  BiLSTM:  {lstm_params}')
             print(f'  Setting: {setting}')
 
-            print(f'\n第 {run_id + 1} 次运行最终优化的超参数数值:')
+            print(f'\n第 {run_id + 1} 次运行解码后的超参数数值:')
             print(f' batch_size: {batch_size}')
             print(f' learning_rate: {learn_rate:.6f}')
             print(f' optimizer: {opt_type}')
@@ -2249,108 +2219,12 @@ def main():
 
             test_performance = {'mae': mae_test, 'rmse': rmse_test, 'mape': mape_test}
 
-            # Pareto前沿演化图
-            print('\n正在绘制 Pareto 前沿演化图...')
-            plt.figure(figsize=(12, 8))
-            colors = plt.cm.viridis(np.linspace(0, 1, len(all_pareto_fronts)))
-            for idx, pf in enumerate(all_pareto_fronts):
-                if pf['num_solutions'] > 0:
-                    perf = pf['performance']
-                    comp = pf['complexity']
-                    valid_mask = np.isfinite(perf) & np.isfinite(comp)
-                    if np.any(valid_mask):
-                        plt.scatter(comp[valid_mask], perf[valid_mask], c=[colors[idx]], s=60, alpha=0.6,
-                                    label=f'第 {pf["generation"]} 代', edgecolors='k', linewidth=0.5)
-            plt.xlabel('模型复杂度 (参数数量)', fontsize=14)
-            plt.ylabel('验证集 RMSE (m/s)', fontsize=14)
-            plt.title('NSGA-II Pareto 前沿演化过程', fontsize=16)
-            plt.legend(fontsize=10, loc='upper right')
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(f'{prefix}pareto_evolution_continuous_lr.png', dpi=300, bbox_inches='tight')
-            plt.show()
-
-            # 关键代数Pareto前沿对比图（带连接线）
-            print('\n正在绘制关键代数Pareto前沿对比图（带连接线）...')
-            target_generations = [1, 5, 10, 20, 25, 30]
-            plt.figure(figsize=(14, 10))
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-            markers = ['o', 's', '^', 'D', 'v', 'p']
-            plotted_any = False
-            for idx, target_gen in enumerate(target_generations):
-                pf = None
-                for front in all_pareto_fronts:
-                    if front['generation'] == target_gen:
-                        pf = front
-                        break
-                if pf is None or pf['num_solutions'] == 0:
-                    continue
-                perf = pf['performance']
-                comp = pf['complexity']
-                valid_mask = np.isfinite(perf) & np.isfinite(comp)
-                if not np.any(valid_mask):
-                    continue
-                perf = perf[valid_mask]
-                comp = comp[valid_mask]
-                sort_idx = np.argsort(comp)
-                comp_sorted = comp[sort_idx]
-                perf_sorted = perf[sort_idx]
-                plt.plot(comp_sorted, perf_sorted, color=colors[idx], linewidth=2, alpha=0.7,
-                         label=f'第 {target_gen} 代 (n={len(perf)})')
-                plt.scatter(comp, perf, c=colors[idx], marker=markers[idx], s=80, alpha=0.9,
-                            edgecolors='black', linewidth=0.5)
-                plotted_any = True
-            if plotted_any:
-                plt.xlabel('模型复杂度 (参数数量)', fontsize=14)
-                plt.ylabel('验证集 RMSE (m/s)', fontsize=14)
-                plt.title('NSGA-II Pareto前沿进化过程对比（带连接线）', fontsize=16, fontweight='bold')
-                plt.legend(fontsize=11, loc='upper right')
-                plt.grid(True, alpha=0.3)
-                plt.figtext(0.5, 0.02,
-                            '注：第1代为初始种群，第30代为最终进化结果\n每条实线连接该代的所有Pareto最优解，展示前沿面形状',
-                            ha='center', fontsize=10, style='italic')
-                plt.tight_layout(rect=[0, 0.05, 1, 0.96])
-                plt.savefig(f'{prefix}pareto_evolution_comparison_connected.png', dpi=300, bbox_inches='tight')
-            plt.show()
-
-            # 最终代Pareto前沿详细图
-            print('\n正在绘制最终代Pareto前沿详细图（第30代）...')
-            final_pf = None
-            for pf in all_pareto_fronts:
-                if pf['generation'] == 30:
-                    final_pf = pf
-                    break
-            if final_pf and final_pf['num_solutions'] > 0:
-                perf_final = final_pf['performance']
-                comp_final = final_pf['complexity']
-                valid_final = np.isfinite(perf_final) & np.isfinite(comp_final)
-                if np.any(valid_final):
-                    perf_final = perf_final[valid_final]
-                    comp_final = comp_final[valid_final]
-                    sort_idx = np.argsort(comp_final)
-                    comp_sorted = comp_final[sort_idx]
-                    perf_sorted = perf_final[sort_idx]
-                    plt.figure(figsize=(12, 8))
-                    plt.plot(comp_sorted, perf_sorted, color='darkred', linewidth=3, alpha=0.8,
-                             marker='o', markersize=10, markerfacecolor='red',
-                             markeredgecolor='black', markeredgewidth=1.5)
-                    plt.xlabel('模型复杂度 (参数数量)', fontsize=14)
-                    plt.ylabel('验证集 RMSE (m/s)', fontsize=14)
-                    plt.title('最终Pareto前沿（第30代）', fontsize=16, fontweight='bold')
-                    plt.grid(True, alpha=0.3)
-                    for i, (comp_val, perf_val) in enumerate(zip(comp_sorted, perf_sorted)):
-                        plt.annotate(f'({comp_val:.0f}, {perf_val:.3f})', xy=(comp_val, perf_val),
-                                     xytext=(5, 5), textcoords='offset points', fontsize=9, alpha=0.7)
-                    plt.tight_layout()
-                    plt.savefig(f'{prefix}pareto_front_final_gen30.png', dpi=300, bbox_inches='tight')
-                    plt.show()
+            # 固定编码模式不绘制 Pareto 前沿相关图像
 
             # 保存结果
             with open(f'{prefix}modeo_cnn_optimization_continuous_lr.pkl', 'wb') as f:
                 pickle.dump({
                     'best_individual': best_individual,
-                    'best_rmse_history': best_rmse_history,
-                    'pareto_fronts': all_pareto_fronts,
                     'test_performance': test_performance,
                     'training_losses': train_losses,
                     'validation_losses': val_losses,
@@ -2363,6 +2237,7 @@ def main():
                         'learn_rate': learn_rate,
                         'opt_type': opt_type
                     },
+                    'fixed_encoding': encoding,
                     'run_id': run_id + 1,
                 }, f)
 
@@ -2382,7 +2257,7 @@ def main():
             # 生成综合报告
             report_metrics = generate_comprehensive_report(
                 model, test_loader, val_loader, DEVICE, min_speed, max_speed,
-                all_pareto_fronts, feature_columns, topo, cnn_params, lstm_params, setting,
+                feature_columns, topo, cnn_params, lstm_params, setting,
                 test_performance, r_test, save_prefix=prefix
             )
 
@@ -2394,20 +2269,7 @@ def main():
             })
             test_results_df.to_csv(f'{prefix}test_set_wind_speed_predictions.csv', index=False, encoding='utf-8-sig')
 
-            # 保存每代Pareto前沿CSV
-            for pf in all_pareto_fronts:
-                gen = pf['generation']
-                perf = pf['performance']
-                comp = pf['complexity']
-                valid_mask = np.isfinite(perf) & np.isfinite(comp)
-                if np.any(valid_mask):
-                    pareto_df = pd.DataFrame({
-                        '模型复杂度 (参数数量)': comp[valid_mask],
-                        '验证集RMSE (m/s)': perf[valid_mask]
-                    })
-                    pareto_df = pareto_df.sort_values(by='模型复杂度 (参数数量)')
-                    filename = f'{prefix}pareto_front_generation_{gen}.csv'
-                    pareto_df.to_csv(filename, index=False, encoding='utf-8-sig')
+            # 固定编码模式不存在 Pareto 前沿，无需保存每代 CSV
         # ====== 新增: if/else 块结束 ======
 
         # ==================== LBA Attack Phase ====================
