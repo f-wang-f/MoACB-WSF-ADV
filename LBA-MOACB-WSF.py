@@ -58,7 +58,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 FILENAME = 'winddata.xlsx'
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
-SEQUENCE_LENGTH =48
+SEQUENCE_LENGTH =10
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -71,8 +71,8 @@ NUM_LSTM_MODULES = 2
 TOPO_BITS_LENGTH = NUM_MODULES * (NUM_MODULES - 1) // 2
 INDIVIDUAL_LENGTH = TOPO_BITS_LENGTH + 5 * NUM_CNN_MODULES + 5 * NUM_LSTM_MODULES + 4
 
-POP_SIZE = 2
-MAX_GEN = 1
+POP_SIZE = 20
+MAX_GEN = 20
 NUM_RUNS = 1
 MUTATION_PROB = 0.6
 CROSSOVER_PROB = 0.8
@@ -110,7 +110,7 @@ BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 #   delta: LBA 生成扰动时的缩放系数（原论文中的 δ）
 LBA_CONFIG = {
     'n': 1,  # number of perturbations per sample
-    'beta': 0.1,  # nVITA perturbation budget factor (原论文 β)
+    'beta': 0.01,  # nVITA perturbation budget factor (原论文 β)
     'maxiter': 60,  # DE max iterations for nVITA baseline
     'tol': 0.01,  # tolerance for nVITA
     'adv_cnt': 100,  # number of adv examples for LBA training

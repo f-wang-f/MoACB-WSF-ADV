@@ -68,7 +68,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 FILENAME = 'winddata.xlsx'
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
-SEQUENCE_LENGTH =48
+SEQUENCE_LENGTH =10
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -129,7 +129,7 @@ LBA_CONFIG = {
     'lba_batch_size': 8,  # LBA model batch size
     'delta_list': [0.75, 1.0, 1.5, 1.75],  # LBA attack scaling factors (原论文 δ)
     'use_bayesian': True,   # 启用贝叶斯卷积层，提升泛化性和不确定性估计
-    'perturb_mask': '0000',  # 二进制掩码表示是否扰动特征，1表示扰动，0表示不扰动
+    'perturb_mask': '0010',  # 二进制掩码表示是否扰动特征，1表示扰动，0表示不扰动
                              # 例如'0010'表示只扰动第3个特征(0-based索引2)
                              # '1111'表示扰动所有4个特征
     'feature_constraint': None,  # 扰动特征数量约束 (None=不限制, 整数=限定特征数)
@@ -139,17 +139,17 @@ LBA_CONFIG = {
 # 论文表 "BEST TRADE-OFF HYBRID ENCODING VECTORS OBTAINED BY THE PROPOSED MoACB-WSF"
 # Dataset: Sotavento 10-min Dataset
 FIXED_ENCODING = {
-    'topo': [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+    'topo': [1, 0, 1, 1, 1, 0, 0, 0, 0, 0],
     'cnn_params': [
-        [0, 0, 1, 0, 1],   # CNN module 0
-        [1, 3, 4, 1, 1],   # CNN module 1
-        [3, 0, 3, 1, 1],   # CNN module 2
+        [0, 0, 6, 0, 3],   # CNN module 0
+        [0, 2, 0, 2, 0],   # CNN module 1
+        [1, 1, 7, 1, 1],   # CNN module 2
     ],
     'lstm_params': [
-        [0, 0, 7, 1, 0],   # BiLSTM module 0 (module index 3)
-        [0, 0, 0, 1, 2],   # BiLSTM module 1 (module index 4)
+        [0, 0, 4, 2, 1],   # BiLSTM module 0 (module index 3)
+        [1, 0, 3, 2, 3],   # BiLSTM module 1 (module index 4)
     ],
-    'setting': [0, 0, 0.0072, 3],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
+    'setting': [1, 3, 0.000349471, 0],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
 }
 
 
@@ -1300,6 +1300,9 @@ class NVITA:
             valid_features = [f for f in self.perturb_features if 0 <= f < num_features]
             if valid_features:
                 return np.array(valid_features)
+            # 空列表表示不允许扰动任何特征
+            if len(self.perturb_features) == 0:
+                return np.array([], dtype=int)
             # 如果没有有效特征，回退到允许所有特征
         # 原有的数量约束逻辑
         if self.feature_constraint is None or self.feature_constraint >= num_features:
@@ -1363,6 +1366,10 @@ class NVITA:
         seq_len = x_np.shape[1]
         num_features = x_np.shape[2]
         allowed_features = self._sample_features(num_features)
+
+        # 没有允许扰动的特征，直接返回原始输入
+        if len(allowed_features) == 0:
+            return X, 0.0
 
         # 初始化种群
         population = []
@@ -1491,13 +1498,16 @@ def run_nvita_attack(model, X_test, Y_test, beta, n, maxiter, tol, device,
 
 
 def run_lba_attack(model, lba_model, X_test, Y_test, delta, n, device,
-                   feature_constraint=None, perturb_features=None, print_info=False):
+                   feature_constraint=None, perturb_features=None, print_info=False,
+                   beta=0.1, feature_ranges=None):
     """
     使用训练好的 LBA 模型执行批量攻击
     delta: 扰动值缩放系数（原论文 δ）
     n: 选取的敏感点数量
     feature_constraint: 限定扰动特征数量
     perturb_features: 精确指定要扰动的特征索引
+    beta: nVITA 扰动预算系数（用于 LBA 扰动值限幅）
+    feature_ranges: 各特征取值范围（用于计算预算）
     """
     model.to(device)
     lba_model.to(device)
@@ -1516,8 +1526,21 @@ def run_lba_attack(model, lba_model, X_test, Y_test, delta, n, device,
     if perturb_features is not None:
         valid_perturb_features = [f for f in perturb_features if 0 <= f < num_features]
 
+    # 空列表表示不允许扰动任何特征
+    if perturb_features is not None and len(perturb_features) == 0:
+        valid_perturb_features = []
+
     for test_ind in range(X_test.shape[0]):
         X_current = X_test[test_ind].unsqueeze(0).to(device)
+
+        # 没有允许扰动的特征，直接返回原始预测
+        if valid_perturb_features is not None and len(valid_perturb_features) == 0:
+            with torch.no_grad():
+                original_pred = model(X_current).item()
+            X_adv_total = torch.cat((X_adv_total, X_current), dim=0)
+            Y_adv_total = torch.cat((Y_adv_total, torch.tensor([[original_pred]]).to(device)), dim=0)
+            Y_pred_total = torch.cat((Y_pred_total, torch.tensor([[original_pred]]).to(device)), dim=0)
+            continue
 
         with torch.no_grad():
             cls_logits, reg_values = lba_model(X_current)
@@ -1552,6 +1575,10 @@ def run_lba_attack(model, lba_model, X_test, Y_test, delta, n, device,
             t_idx = idx // num_features
             f_idx = idx % num_features
             perturb = delta * reg_values[0, idx].item()
+            # 扰动值限幅: 不超过 nVITA 预算的 delta 倍，防止缩放后扰动失控
+            if feature_ranges is not None:
+                budget = beta * feature_ranges[f_idx]
+                perturb = np.clip(perturb, -delta * budget, delta * budget)
             X_adv[0, t_idx, f_idx] += perturb
 
         # 截断到 [0, 1]
@@ -1731,13 +1758,35 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
     # 构建 nVITA 真实扰动标签（用于评估 LBA 拟合能力）
     eval_mask_true, eval_perturb_true = build_lba_labels(X_adv_nvita_eval, X_eval, device)
 
+    # 用于可视化的原始数据缓存
+    viz_data = {
+        'y_true': None,
+        'y_clean': None,
+        'y_nvita': None,
+        'y_lba': {},  # delta -> predictions
+        'X_clean': X_eval.clone(),
+        'X_nvita': X_adv_nvita_eval.clone(),
+        'X_lba': {},  # delta -> adv samples
+        'feature_columns': ['风向', '理论功率', '实际功率', '风速'],
+    }
+    with torch.no_grad():
+        viz_data['y_true'] = Y_eval.cpu().numpy().flatten()
+        viz_data['y_clean'] = model(X_eval).cpu().numpy().flatten()
+        viz_data['y_nvita'] = model(X_adv_nvita_eval).cpu().numpy().flatten()
+
     # LBA 攻击（在评估子集上）+ 拟合质量指标
     for delta in delta_list:
         print(f"\n  --- LBA Attack (delta={delta}) on eval set ---")
         X_adv_lba_eval, _, _ = run_lba_attack(
             model, lba_model, X_eval, Y_eval, delta, n, device,
-            feature_constraint=feature_constraint, perturb_features=perturb_features, print_info=False
+            feature_constraint=feature_constraint, perturb_features=perturb_features, print_info=False,
+            beta=beta, feature_ranges=feature_ranges
         )
+        # 反归一化前保存原始预测用于可视化
+        with torch.no_grad():
+            viz_data['y_lba'][delta] = model(X_adv_lba_eval).cpu().numpy().flatten()
+        viz_data['X_lba'][delta] = X_adv_lba_eval.clone()
+
         lba_results = evaluate_attack(
             model, X_eval, Y_eval, X_adv_lba_eval,
             min_speed, max_speed, f"LBA (delta={delta})", device
@@ -1765,7 +1814,204 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
         print(f"{val['attack_name']:<20} {val['rmse_adv']:>10.4f} {val['mape_adv']:>10.2f} "
               f"{val['drop_rmse_pct']:>10.2f} {ar_str} {pr_str}")
 
+    # 保存对抗攻击可视化图表
+    os.makedirs(os.path.join(OUTPUT_DIR, 'attack_figures'), exist_ok=True)
+    viz_prefix = os.path.join(OUTPUT_DIR, 'attack_figures', f'beta{beta}_adv{adv_cnt}_')
+    try:
+        plot_attack_effectiveness(results, save_path=viz_prefix + 'attack_effectiveness.png')
+        plot_clean_vs_adv_predictions(viz_data, min_speed, max_speed,
+                                      save_path=viz_prefix + 'clean_vs_adv_predictions.png')
+        plot_perturbation_analysis(viz_data, save_path=viz_prefix + 'perturbation_analysis.png')
+        print(f"\n对抗攻击可视化图表已保存至: {os.path.join(OUTPUT_DIR, 'attack_figures')}/")
+    except Exception as e:
+        print(f"\n警告: 生成对抗攻击可视化图表时出错: {e}")
+        traceback.print_exc()
+
     return results, lba_model, X_adv_nvita_eval
+
+
+# =============================================================================
+# SECTION 9b: 对抗攻击可视化函数
+# =============================================================================
+
+def plot_attack_effectiveness(results, save_path=None):
+    """
+    绘制攻击效果对比图：RMSE 下降率柱状图 + AR 折线图
+    类似论文中对比不同攻击方法效果的图表
+    """
+    methods = []
+    drop_rates = []
+    ar_values = []
+    rmse_adv_values = []
+
+    for key, val in results.items():
+        methods.append(val['attack_name'])
+        drop_rates.append(val['drop_rmse_pct'])
+        rmse_adv_values.append(val['rmse_adv'])
+        ar_values.append(val.get('sensitive_ar', None))
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    fig.suptitle('LBA 与 nVITA 攻击效果对比', fontsize=16, fontweight='bold')
+
+    # 左图：RMSE 下降率柱状图
+    ax1 = axes[0]
+    colors = ['#2E86AB' if 'nVITA' in m else '#A23B72' for m in methods]
+    bars = ax1.bar(methods, drop_rates, color=colors, alpha=0.8, edgecolor='black')
+    ax1.axhline(y=0, color='red', linestyle='--', linewidth=1.5, label='无攻击基线')
+    ax1.set_ylabel('RMSE 下降率 (%)', fontsize=12)
+    ax1.set_title('攻击导致的 RMSE 相对变化', fontsize=14)
+    ax1.tick_params(axis='x', rotation=30)
+    ax1.grid(True, axis='y', alpha=0.3)
+    ax1.legend()
+
+    # 在柱子上标注数值
+    for bar, val in zip(bars, drop_rates):
+        height = bar.get_height()
+        ax1.annotate(f'{val:.2f}%',
+                     xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 3 if height >= 0 else -15),
+                     textcoords="offset points", ha='center', va='bottom' if height >= 0 else 'top',
+                     fontsize=9)
+
+    # 右图：AR 指标（仅 LBA 方法有）
+    ax2 = axes[1]
+    lba_methods = [m for m, ar in zip(methods, ar_values) if ar is not None]
+    lba_ar = [ar for ar in ar_values if ar is not None]
+    if lba_ar:
+        ax2.plot(lba_methods, lba_ar, 'o-', color='#F18F01', linewidth=2, markersize=8, label='敏感点准确率 AR')
+        ax2.set_ylim(0, 1.05)
+        ax2.set_ylabel('AR (Accuracy Rate)', fontsize=12)
+        ax2.set_title('LBA 敏感点预测准确率', fontsize=14)
+        ax2.tick_params(axis='x', rotation=30)
+        ax2.grid(True, alpha=0.3)
+        ax2.legend()
+        for i, (m, ar) in enumerate(zip(lba_methods, lba_ar)):
+            ax2.annotate(f'{ar:.3f}', xy=(i, ar), xytext=(0, 10),
+                         textcoords="offset points", ha='center', fontsize=9)
+    else:
+        ax2.text(0.5, 0.5, '无 AR 数据', transform=ax2.transAxes, ha='center', va='center', fontsize=12)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  已保存: {save_path}")
+    plt.show()
+
+
+def plot_clean_vs_adv_predictions(viz_data, min_speed, max_speed, save_path=None, max_points=500):
+    """
+    绘制清洁预测与对抗预测的时序对比图
+    反归一化到原始风速尺度后绘制
+    """
+    y_true = viz_data['y_true'] * (max_speed - min_speed) + min_speed
+    y_clean = viz_data['y_clean'] * (max_speed - min_speed) + min_speed
+    y_nvita = viz_data['y_nvita'] * (max_speed - min_speed) + min_speed
+
+    n_samples = len(y_true)
+    n_plot = min(max_points, n_samples)
+    idx = np.arange(n_plot)
+
+    # 计算需要多少个子图：1 个 nVITA + N 个 LBA delta
+    n_lba = len(viz_data['y_lba'])
+    n_cols = 2
+    n_rows = int(np.ceil((1 + n_lba) / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4 * n_rows), squeeze=False)
+    fig.suptitle('清洁预测 vs 对抗预测对比（反归一化风速）', fontsize=16, fontweight='bold')
+
+    def plot_single(ax, y_adv, title):
+        ax.plot(idx, y_true[:n_plot], 'b-', linewidth=1.5, label='真实值', alpha=0.8)
+        ax.plot(idx, y_clean[:n_plot], 'g--', linewidth=1.5, label='清洁预测', alpha=0.8)
+        ax.plot(idx, y_adv[:n_plot], 'r-', linewidth=1.5, label='对抗预测', alpha=0.7)
+        ax.set_xlabel('样本索引', fontsize=11)
+        ax.set_ylabel('风速 (m/s)', fontsize=11)
+        ax.set_title(title, fontsize=12)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    # nVITA
+    plot_single(axes[0, 0], y_nvita, 'nVITA 基线攻击')
+
+    # LBA variants
+    for i, delta in enumerate(sorted(viz_data['y_lba'].keys())):
+        row = (i + 1) // n_cols
+        col = (i + 1) % n_cols
+        y_lba = viz_data['y_lba'][delta] * (max_speed - min_speed) + min_speed
+        plot_single(axes[row, col], y_lba, f'LBA 攻击 (delta={delta})')
+
+    # 隐藏未使用的子图
+    for j in range(1 + n_lba, n_rows * n_cols):
+        row = j // n_cols
+        col = j % n_cols
+        axes[row, col].axis('off')
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  已保存: {save_path}")
+    plt.show()
+
+
+def plot_perturbation_analysis(viz_data, save_path=None):
+    """
+    绘制扰动分析图：
+    - 各攻击方法下各特征的平均扰动幅值
+    - nVITA 与 LBA 扰动分布对比
+    """
+    feature_columns = viz_data['feature_columns']
+    num_features = len(feature_columns)
+
+    # 计算各特征上的平均绝对扰动
+    def mean_abs_perturb(X_adv, X_clean):
+        diff = (X_adv - X_clean).abs().cpu().numpy()  # (N, seq_len, num_features)
+        return diff.mean(axis=(0, 1))  # (num_features,)
+
+    nvita_perturb = mean_abs_perturb(viz_data['X_nvita'], viz_data['X_clean'])
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    fig.suptitle('对抗扰动分析', fontsize=16, fontweight='bold')
+
+    # 左图：各特征平均扰动幅值对比
+    ax1 = axes[0]
+    x_pos = np.arange(num_features)
+    width = 0.15
+    ax1.bar(x_pos - width, nvita_perturb, width, label='nVITA', color='#2E86AB', alpha=0.8, edgecolor='black')
+    colors_lba = ['#A23B72', '#F18F01', '#C73E1D', '#3B1F2B']
+    for i, delta in enumerate(sorted(viz_data['X_lba'].keys())):
+        lba_perturb = mean_abs_perturb(viz_data['X_lba'][delta], viz_data['X_clean'])
+        ax1.bar(x_pos + i * width, lba_perturb, width,
+                label=f'LBA (δ={delta})', color=colors_lba[i % len(colors_lba)], alpha=0.8, edgecolor='black')
+
+    ax1.set_ylabel('平均绝对扰动幅值', fontsize=12)
+    ax1.set_title('各特征上的平均扰动幅值', fontsize=14)
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(feature_columns, rotation=15)
+    ax1.legend(fontsize=10)
+    ax1.grid(True, axis='y', alpha=0.3)
+
+    # 右图：扰动分布箱线图（只取第一个特征作为示例，避免图太乱）
+    ax2 = axes[1]
+    perturb_data = [nvita_perturb]
+    labels = ['nVITA']
+    for delta in sorted(viz_data['X_lba'].keys()):
+        diff = (viz_data['X_lba'][delta] - viz_data['X_clean']).abs().cpu().numpy().flatten()
+        perturb_data.append(diff)
+        labels.append(f'LBA δ={delta}')
+
+    bp = ax2.boxplot(perturb_data, labels=labels, patch_artist=True)
+    for patch, color in zip(bp['boxes'], ['#2E86AB'] + colors_lba[:len(bp['boxes']) - 1]):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    ax2.set_ylabel('绝对扰动幅值', fontsize=12)
+    ax2.set_title('扰动幅值分布箱线图', fontsize=14)
+    ax2.tick_params(axis='x', rotation=30)
+    ax2.grid(True, axis='y', alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  已保存: {save_path}")
+    plt.show()
 
 
 # =============================================================================
@@ -1983,7 +2229,7 @@ def main():
         for i, c in enumerate(mask):
             if c == '1':
                 features.append(i)
-        return features if features else None
+        return features  # 空列表表示不允许扰动任何特征
     
     args.perturb_features = mask_to_features(args.perturb_mask)
 
