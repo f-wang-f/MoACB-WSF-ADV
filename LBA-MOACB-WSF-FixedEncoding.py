@@ -130,7 +130,7 @@ LBA_CONFIG = {
     'lba_batch_size': 16,  # LBA model batch size (对齐官方实现默认值)
     'delta_list': [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0],  # LBA attack scaling factors (原论文 δ)
     'use_bayesian': False   ,  # 启用贝叶斯卷积层，提升泛化性和不确定性估计
-    'perturb_mask': '0010',  # 二进制掩码字符串，指定要扰动的特征
+    'perturb_mask': '0100',  # 二进制掩码字符串，指定要扰动的特征
                              # 例如'0010'表示只扰动第3个特征(0-based索引2)
                              # '1111'表示扰动所有4个特征
     'feature_constraint': None,  # 扰动特征数量约束 (None=不限制, 整数=限定特征数)
