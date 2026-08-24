@@ -120,36 +120,38 @@ BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 #   delta: LBA 生成扰动时的缩放系数（原论文中的 δ）
 LBA_CONFIG = {
     'n': 1,  # number of perturbations per sample
-    'beta': 0.1,  # nVITA perturbation budget factor (原论文 β)
-    'maxiter': 60,  # DE max iterations for nVITA baseline
+    'beta': 0.3,  # nVITA perturbation budget factor (原论文 β)
+    'maxiter': 100,  # DE max iterations for nVITA baseline
+    'pop_size': 30,  # DE population size for nVITA baseline（官方默认 15，增大可提升搜索覆盖度，但每代计算量线性增加）
     'tol': 0.01,  # tolerance for nVITA
-    'adv_cnt': 100,  # number of adv examples for LBA training
-    'lba_epochs': 50,  # LBA model training epochs
-    'lba_lr': 0.005,  # LBA model learning rate
-    'lba_batch_size': 8,  # LBA model batch size
-    'delta_list': [0.75, 1.0, 1.5, 1.75],  # LBA attack scaling factors (原论文 δ)
-    'use_bayesian': True,   # 启用贝叶斯卷积层，提升泛化性和不确定性估计
-    'perturb_mask': '0010',  # 二进制掩码表示是否扰动特征，1表示扰动，0表示不扰动
+    'adv_cnt': 268,  # number of adv examples for LBA training
+    'lba_epochs': 70,  # LBA model training epochs
+    'lba_lr': 0.001,  # LBA model learning rate
+    'lba_batch_size': 16,  # LBA model batch size (对齐官方实现默认值)
+    'delta_list': [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0],  # LBA attack scaling factors (原论文 δ)
+    'use_bayesian': False   ,  # 启用贝叶斯卷积层，提升泛化性和不确定性估计
+    'perturb_mask': '0001',  # 二进制掩码字符串，指定要扰动的特征
                              # 例如'0010'表示只扰动第3个特征(0-based索引2)
                              # '1111'表示扰动所有4个特征
     'feature_constraint': None,  # 扰动特征数量约束 (None=不限制, 整数=限定特征数)
+    'dir_weight': 0,  # 方向一致性惩罚权重：MSE 对"小幅值但符号错"惩罚不足，加这个项强制预测符号与真实值一致，0 表示关闭该惩罚；必须为非负数，负数会让模型反而主动学反方向
 }
 
 # ==================== FIXED MANUAL ENCODING FROM PAPER ====================
 # 论文表 "BEST TRADE-OFF HYBRID ENCODING VECTORS OBTAINED BY THE PROPOSED MoACB-WSF"
 # Dataset: Sotavento 10-min Dataset
 FIXED_ENCODING = {
-    'topo': [1, 0, 1, 1, 1, 0, 0, 0, 0, 0],
+    'topo': [1, 1, 0, 0, 0, 0, 1, 1, 0, 0],
     'cnn_params': [
-        [0, 0, 6, 0, 3],   # CNN module 0
-        [0, 2, 0, 2, 0],   # CNN module 1
-        [1, 1, 7, 1, 1],   # CNN module 2
+        [0, 0, 2, 0, 3],   # CNN module 0
+        [0, 3, 7, 0, 2],   # CNN module 1
+        [2, 0, 7, 2, 2],   # CNN module 2
     ],
     'lstm_params': [
-        [0, 0, 4, 2, 1],   # BiLSTM module 0 (module index 3)
-        [1, 0, 3, 2, 3],   # BiLSTM module 1 (module index 4)
+        [0, 0, 4, 1, 2],   # BiLSTM module 0 (module index 3)
+        [0, 0, 3, 1, 3],   # BiLSTM module 1 (module index 4)
     ],
-    'setting': [1, 3, 0.000349471, 0],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
+    'setting': [0, 1, 0.0005761369, 0],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
 }
 
 
@@ -869,34 +871,30 @@ def environmental_selection(combined_pop, combined_perf, combined_complex, combi
 
 class LBA_Dataset(Dataset):
     """
-    LBA 训练数据集
-    每个样本包含: 原始时序输入、扰动位置掩码(0/1)、扰动值矩阵
-    采用首次赋值、后续拼接的方式，避免初始化时维度不匹配
+    LBA 训练数据集（对齐 LearningBased_Atk/attacks/LBA/LBA_dataset.py）
+    每个样本包含: 原始时序输入 data、敏感点位置标签 labels、敏感点扰动值 value
+    labels 与 value 形状均为 (1, n)，位置编码为 feature_idx * windows_cnt + window_idx
     """
-    def __init__(self, device='cpu'):
-        self.data = None
-        self.mask = None
-        self.perturb = None
+    def __init__(self, device='cpu', data=None, labels=None, value=None):
         self.device = device
+        self.data = torch.empty(0).to(device) if data is None else data.to(device)
+        self.labels = torch.empty(0).to(device) if labels is None else labels.to(device)
+        self.value = torch.empty(0).to(device) if value is None else value.to(device)
 
-    def add_sample(self, x, mask, perturb):
-        x = x.to(self.device)
-        mask = mask.to(self.device)
-        perturb = perturb.to(self.device)
-        if self.data is None:
-            self.data = x
-            self.mask = mask
-            self.perturb = perturb
-        else:
-            self.data = torch.cat((self.data, x), dim=0)
-            self.mask = torch.cat((self.mask, mask), dim=0)
-            self.perturb = torch.cat((self.perturb, perturb), dim=0)
+    def add_X(self, x):
+        self.data = torch.cat((self.data, x.to(self.device)), dim=0)
+
+    def add_Y(self, y):
+        self.labels = torch.cat((self.labels, y.to(self.device)), dim=0)
+
+    def add_value(self, value):
+        self.value = torch.cat((self.value, value.to(self.device)), dim=0)
 
     def __len__(self):
-        return len(self.data) if self.data is not None else 0
+        return self.data.shape[0]
 
     def __getitem__(self, idx):
-        return self.data[idx], self.mask[idx], self.perturb[idx]
+        return self.data[idx], self.labels[idx], self.value[idx]
 
 
 class BayesianConv1d(nn.Module):
@@ -1032,54 +1030,48 @@ class BayesianLinear(nn.Module):
 
 class CNN_LBA_Model(nn.Module):
     """
-    LBA 学习模型：学习输入时序 -> 敏感位置 + 扰动值 的映射
-    卷积在时间维度滑动，双分支输出全位置的分类 logits 与回归值
-    use_bayesian=True 时启用贝叶斯卷积层和全连接层，提升泛化性和不确定性估计
+    LBA 学习模型（对齐 LearningBased_Atk/attacks/LBA/LBA_model.py）
+    输入不做转置：时间步作为卷积通道，特征维作为卷积长度
+    分类头输出 features_cnt*windows_cnt + 1 类，最后一类表示"不施加扰动"
+    回归头只输出 n 个扰动值，与 Top-n 敏感点一一对应
+    use_bayesian=True 时用自实现贝叶斯卷积层替代官方的 blitz BayesianConv1d
     """
-    def __init__(self, num_features, seq_len, n, use_bayesian=False):
+    def __init__(self, features_cnt, windows_cnt, n, use_bayesian=False):
         super(CNN_LBA_Model, self).__init__()
-        self.num_features = num_features
-        self.seq_len = seq_len
+        self.features_cnt = features_cnt
+        self.windows_cnt = windows_cnt
         self.n = n
-        self.total_positions = seq_len * num_features
+        self.total_positions = features_cnt * windows_cnt
+        self.no_attack_class = features_cnt * windows_cnt
+        self.num_classes = features_cnt * windows_cnt + 1
         self.use_bayesian = use_bayesian
 
         if use_bayesian:
-            # 贝叶斯卷积层 + 全连接层
-            self.conv1 = BayesianConv1d(num_features, 32, kernel_size=3, stride=1, padding=1)
-            self.conv2 = BayesianConv1d(32, 64, kernel_size=3, stride=1, padding=1)
-            self.fc_shared = BayesianLinear(64 * seq_len, 128)
-            self.fc_cls = BayesianLinear(128, self.total_positions)
-            self.fc_reg = BayesianLinear(128, self.total_positions)
-            # 贝叶斯模式下仍保留 BN（用于稳定训练）
-            self.bn1 = nn.BatchNorm1d(32)
-            self.bn2 = nn.BatchNorm1d(64)
-            self.bn_shared = nn.BatchNorm1d(128)
+            self.conv1 = BayesianConv1d(windows_cnt, 16, kernel_size=3, stride=1, padding=1)
+            self.conv2 = BayesianConv1d(16, 32, kernel_size=3, stride=1, padding=1)
         else:
-            # 普通确定性层
-            self.conv1 = nn.Conv1d(num_features, 32, kernel_size=3, stride=1, padding=1)
-            self.bn1 = nn.BatchNorm1d(32)
-            self.conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
-            self.bn2 = nn.BatchNorm1d(64)
-            self.fc_shared = nn.Linear(64 * seq_len, 128)
-            self.bn_shared = nn.BatchNorm1d(128)
-            self.fc_cls = nn.Linear(128, self.total_positions)
-            self.fc_reg = nn.Linear(128, self.total_positions)
+            self.conv1 = nn.Conv1d(windows_cnt, 16, kernel_size=3, stride=1, padding=1)
+            self.conv2 = nn.Conv1d(16, 32, kernel_size=3, stride=1, padding=1)
+
+        self.fc1 = nn.Linear(32 * features_cnt, 64)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.fc2_classification = nn.Linear(64, self.num_classes)
+        self.fc2_attack = nn.Linear(64, n)
 
     def forward(self, x):
-        # x shape: (batch, seq_len, features) -> 转置为 (batch, features, seq_len)
-        x = x.transpose(1, 2)
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = x.flatten(1)
-        x = F.relu(self.bn_shared(self.fc_shared(x)))
+        # x shape: (batch, windows_cnt, features_cnt)，与官方一致不转置
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.view(-1, 32 * self.features_cnt)
+        x = F.relu(self.fc1(x))
+        x = self.bn1(x)
 
-        cls_logits = self.fc_cls(x)    # (batch, total_positions)
-        reg_values = self.fc_reg(x)    # (batch, total_positions)
-        return cls_logits, reg_values
+        output_classification = self.fc2_classification(x)  # (batch, features*windows + 1)
+        output_attack = self.fc2_attack(x)                  # (batch, n)
+        return output_classification, output_attack
 
     def kl_divergence(self):
-        """汇总所有贝叶斯层的 KL 散度（仅贝叶斯模式下有效）"""
+        """汇总所有贝叶斯层的 KL 散度（仅贝叶斯模式下有效，供不确定性检视用）"""
         if not self.use_bayesian:
             return torch.tensor(0.0)
         kl = torch.tensor(0.0)
@@ -1093,43 +1085,115 @@ class CNN_LBA_Model(nn.Module):
         return f"CNN_LBA_Model({mode})"
 
 
-def build_lba_labels(X_adv, X_clean, device):
+def get_sensitive_point_and_value(eta, n):
     """
-    从对抗样本与干净样本构建 LBA 训练标签
-    返回: mask(0/1), perturb(扰动值)，形状均为 (batch, seq_len*features)
+    从单样本扰动矩阵中提取敏感点位置与扰动值（对齐官方 get_sensitive_point_and_value）
+    eta: (1, windows_cnt, features_cnt)
+    位置编码: index = feature_idx * windows_cnt + window_idx
+    非零扰动多于 n 个时保留绝对值最大的 n 个；不足 n 个时用"无攻击"类 + 0 值补齐
+    返回: points (1, n) long, values (1, n) float
     """
-    batch_size = X_clean.shape[0]
-    seq_len = X_clean.shape[1]
-    num_features = X_clean.shape[2]
-    total = seq_len * num_features
+    windows_cnt = eta.shape[1]
+    features_cnt = eta.shape[2]
+    no_attack_class = features_cnt * windows_cnt
 
-    eta = X_adv - X_clean  # (batch, seq_len, features)
-    mask = (eta.abs() > 1e-8).float().reshape(batch_size, total)
-    perturb = eta.reshape(batch_size, total)
-    return mask.to(device), perturb.to(device)
+    tmp = eta.detach().clone().transpose(1, 2).reshape(-1)
+    points, values = [], []
+    for ind, sub in enumerate(tmp.cpu().tolist()):
+        if sub != 0:
+            points.append(ind)
+            values.append(sub)
+
+    if len(points) > n:
+        order = sorted(range(len(points)), key=lambda i: abs(values[i]), reverse=True)[:n]
+        points = [points[i] for i in order]
+        values = [values[i] for i in order]
+
+    # nVITA 有时生成不足 n 个非零扰动，用"无攻击"类兜底
+    while len(points) < n:
+        points.append(no_attack_class)
+        values.append(0.0)
+
+    return (torch.tensor(points, dtype=torch.long).unsqueeze(0),
+            torch.tensor(values, dtype=torch.float).unsqueeze(0))
 
 
-def train_lba_model(train_data, model, batch_size=25, learning_rate=0.001, epochs=50,
-                    device='cpu', print_info=False, n=1, use_bayesian=False):
+def get_LBA_Dataset(X_clean, X_adv, n, device, beta=1.0):
     """
-    训练 LBA 模型
-    分类损失: 
-      - n=1 时使用 CrossEntropyLoss (单标签多分类，与原论文一致)
-      - n>1 时使用 BCEWithLogitsLoss (多标签二分类)
-    回归损失: MSELoss (仅在真实扰动位置计算)
-    贝叶斯模式: 额外添加 KL 散度正则项，约束后验权重接近先验
+    逐样本提取 nVITA 敏感点标签，构建 LBA 训练集（对齐官方 get_LBA_Dataset）
+
+    beta: nVITA 扰动预算系数（原论文 β）。不同特征上 nVITA 找到的真实扰动值
+    幅值差异很大（敏感特征扰动值大、不敏感特征扰动值小），直接用原始值作为回归
+    标签会导致不同特征上回归任务的难易程度不一致。这里将标签除以 beta 归一化到
+    大致 [-1, 1] 范围，使回归头在各特征上的学习难度更一致，不再需要额外的损失权重。
+    对应的还原(乘回 beta)在 run_lba_attack 中完成。
     """
-    if n == 1:
-        criterion_cls = nn.CrossEntropyLoss()
-    else:
-        criterion_cls = nn.BCEWithLogitsLoss()
-    criterion_reg = nn.MSELoss()
+    lba_data = LBA_Dataset(device=device)
+    for ind in range(X_clean.shape[0]):
+        X_current = X_clean[ind].unsqueeze(0)
+        X_current_adv = X_adv[ind].unsqueeze(0)
+        point, values = get_sensitive_point_and_value(X_current_adv - X_current, n)
+        values = values / beta if beta else values  # 归一化扰动值标签，消除特征间尺度差异
+        lba_data.add_X(X_current)
+        lba_data.add_Y(point)
+        lba_data.add_value(values)
+    return lba_data
+
+
+def build_sensitive_labels(X_adv, X_clean, n):
+    """
+    批量提取敏感点位置与扰动值，用于 LBA 拟合质量评估
+    返回: points (N, n) long, values (N, n) float
+    """
+    points_all, values_all = [], []
+    for ind in range(X_clean.shape[0]):
+        p, v = get_sensitive_point_and_value(
+            X_adv[ind].unsqueeze(0) - X_clean[ind].unsqueeze(0), n)
+        points_all.append(p)
+        values_all.append(v)
+    return torch.cat(points_all, dim=0), torch.cat(values_all, dim=0)
+
+
+def print_sign_distribution(values_true, label):
+    """
+    打印 nVITA 真实扰动值的正/负分布统计，用于诊断训练子集与评估子集的
+    nVITA 敏感方向是否存在真实的分布漂移（时序划分可能导致训练/评估子集处于
+    不同风况区间，使得敏感方向本身就不一致，无法通过调损失函数修复）
+    """
+    v = values_true.detach().cpu().numpy().flatten()
+    nz = v[v != 0]
+    if len(nz) == 0:
+        print(f"  [标签方向分布/{label}] 无非零扰动样本")
+        return
+    pos_pct = (nz > 0).mean() * 100
+    neg_pct = (nz < 0).mean() * 100
+    print(f"  [标签方向分布/{label}] 非零样本数={len(nz)}, 正扰动占比={pos_pct:.1f}%, "
+          f"负扰动占比={neg_pct:.1f}%, 均值={nz.mean():.6f}")
+
+
+def train_lba_model(train_data, model, batch_size=25, learning_rate=0.005, epochs=50,
+                    device='cpu', print_info=False, n=1, use_bayesian=False, dir_weight=1.0):
+    """
+    训练 LBA 模型（对齐 LearningBased_Atk/attacks/LBA/LBA_model.py::train_model）
+    分类损失: CrossEntropyLoss，标签为敏感点位置索引（含"无攻击"类）
+    回归损失: MSELoss + 方向一致性惩罚，直接监督 n 个扰动值输出
+    两个主损失（分类/回归）仍分别独立 backward（分类损失保留计算图），随后统一 step
+    与官方一致：贝叶斯层不向损失额外添加 KL 项，不确定性仅由重参数化采样引入
+
+    dir_weight: 方向一致性惩罚权重。MSELoss 只关心预测值与真实值的数值距离，对于幅值本身就很
+    小的弱特征，即使预测符号完全反了，只要预测值也很小，loss 仍会很小，导致方向学反但训练损失
+    看不出异常。这里在 MSE 基础上叠加 relu(-pred*true) 作为方向惩罚：两者符号一致时为 0，
+    符号相反时为正值且对 pred 的梯度不依赖于当前幅值大小，能在幅值接近 0 时仍然主动把预测拉向正确方向。
+    """
+    criterion_cls = nn.CrossEntropyLoss()
+    criterion_atk = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-    # 贝叶斯模式下使用 KL 散度权重系数：1 / (batch_size * num_batches)
-    # 保证 KL 项与数据似然项量级相当
-    num_batches = max(1, len(train_data) // batch_size)
-    kl_weight = 1.0 / (batch_size * num_batches) if use_bayesian else 0.0
+    if dir_weight < 0:
+        # dir_weight 为负数会让模型主动学习与真实符号相反的方向（等价于故意训练反向攻击），
+        # 一定是误配置，这里直接纠正为 0 并告警，而不是静默产生反向学习的结果
+        print(f"  [警告] dir_weight={dir_weight} 为负数，会导致方向惩罚变成\"鼓励学反\"，已自动纠正为 0")
+        dir_weight = 0.0
 
     loss_cls_list = []
     loss_reg_list = []
@@ -1139,56 +1203,48 @@ def train_lba_model(train_data, model, batch_size=25, learning_rate=0.001, epoch
 
     for epoch in range(epochs):
         total_loss_cls = 0.0
-        total_loss_reg = 0.0
+        total_loss_atk = 0.0
+        total_dir_penalty = 0.0
 
         train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=True)
-        for inputs, mask_true, perturb_true in train_dataloader:
+        for inputs, label, value in train_dataloader:
             inputs = inputs.to(device)
-            mask_true = mask_true.to(device)
-            perturb_true = perturb_true.to(device)
+            label = label.to(device)
+            value = value.to(device)
 
-            outputs_cls, outputs_reg = model(inputs)
+            outputs_cls, output_atk = model(inputs)
 
             optimizer.zero_grad()
-            # 分类损失: 根据 n 的值选择损失函数
             if n == 1:
-                # 单标签多分类: 将 mask 转换为类别索引
-                # mask_true shape: (batch, total_positions) -> 找到唯一的 1 的位置
-                cls_targets = mask_true.argmax(dim=1)  # (batch,)
-                loss_cls = criterion_cls(outputs_cls, cls_targets)
+                # 与官方一致：单敏感点时标签展平为 (batch,)
+                loss_cls = criterion_cls(outputs_cls, label.view(-1).long())
             else:
-                loss_cls = criterion_cls(outputs_cls, mask_true)
+                # n>1 时对每个敏感点位置分别计算 CE 后取均值
+                loss_cls = sum(criterion_cls(outputs_cls, label[:, k].long())
+                               for k in range(n)) / n
+            loss_atk_mse = criterion_atk(output_atk, value.float())
+            # 方向一致性惩罚：预测值与真实值符号不一致时施加惩罚，不依赖幅值大小，弥补 MSE 对小幅值、符号错情况的惩罚不足
+            dir_penalty = torch.relu(-output_atk * value.float()).mean()
+            loss_atk = loss_atk_mse + dir_weight * dir_penalty
 
-            # 回归损失: 仅计算有扰动的位置
-            mask_bool = mask_true.bool()
-            if mask_bool.any():
-                loss_reg = criterion_reg(outputs_reg[mask_bool], perturb_true[mask_bool])
-            else:
-                loss_reg = torch.tensor(0.0, device=device)
-
-            # 联合损失
-            loss = loss_cls + 0.5 * loss_reg
-
-            # 贝叶斯模式：添加 KL 散度正则项
-            if use_bayesian:
-                kl_loss = model.kl_divergence() * kl_weight
-                loss = loss + kl_loss
-
-            loss.backward()
+            loss_cls.backward(retain_graph=True)
+            loss_atk.backward()
             optimizer.step()
 
             total_loss_cls += loss_cls.item()
-            total_loss_reg += loss_reg.item()
+            total_loss_atk += loss_atk_mse.item()
+            total_dir_penalty += dir_penalty.item()
 
-        avg_cls = total_loss_cls / len(train_dataloader)
-        avg_reg = total_loss_reg / len(train_dataloader)
+        # 与官方一致：按样本总数归一化
+        avg_cls = total_loss_cls / len(train_data)
+        avg_atk = total_loss_atk / len(train_data)
+        avg_dir = total_dir_penalty / len(train_data)
         loss_cls_list.append(avg_cls)
-        loss_reg_list.append(avg_reg)
+        loss_reg_list.append(avg_atk)
 
         if print_info and (epoch + 1) % 10 == 0:
-            kl_str = f", KL: {model.kl_divergence().item() * kl_weight:.6f}" if use_bayesian else ""
-            print(f"  LBA Epoch {epoch + 1}/{epochs}, "
-                  f"Cls Loss: {avg_cls:.6f}, Reg Loss: {avg_reg:.6f}{kl_str}")
+            print(f"  LBA Epoch {epoch + 1}/{epochs}, Cls Loss: {avg_cls:.6f}, "
+                  f"Atk Loss(MSE): {avg_atk:.6f}, Dir Penalty: {avg_dir:.6f}")
 
     return loss_cls_list, loss_reg_list
 
@@ -1197,73 +1253,69 @@ def train_lba_model(train_data, model, batch_size=25, learning_rate=0.001, epoch
 # SECTION 6b: LBA 拟合能力评估指标
 # =============================================================================
 
-def calc_sensitive_point_ar(mask_true, cls_logits, n):
+def calc_sensitive_point_ar(points_true, cls_logits, n):
     """
-    计算敏感点预测准确率 AR（Accuracy Rate）
-    衡量 LBA 预测的 Top-n 敏感点与 nVITA 真实敏感点的重合比例
-    对应原论文公式 (10)
+    计算敏感点预测准确率 AR（Accuracy Rate），对应原论文公式 (10)
+    与官方 exp.py 一致采用整体匹配：LBA 预测的 Top-n 位置集合需与 nVITA 真实敏感点完全一致
+    官方直接比较两个 list，这里先排序再比较，避免 topk 返回顺序干扰（n=1 时两者等价）
 
-    mask_true:  (batch, total_positions) 真实扰动掩码 (0/1)
-    cls_logits: (batch, total_positions) LBA 输出的分类 logits
-    n:          每个样本的扰动点数
+    points_true: (batch, n) nVITA 真实敏感点位置索引
+    cls_logits:  (batch, features*windows + 1) LBA 分类头输出
+    n:           每个样本的扰动点数
     """
-    batch_size = mask_true.shape[0]
+    batch_size = points_true.shape[0]
     _, top_pred = torch.topk(cls_logits, n, dim=1)
-    ar_total = 0.0
-    valid_cnt = 0
+    correct = 0
     for i in range(batch_size):
-        true_pos = set(torch.where(mask_true[i] > 0.5)[0].cpu().numpy())
-        pred_pos = set(top_pred[i].cpu().numpy())
-        if len(true_pos) == 0:
-            continue
-        overlap = len(true_pos & pred_pos)
-        ar_total += overlap / len(true_pos)
-        valid_cnt += 1
-    return ar_total / valid_cnt if valid_cnt > 0 else 0.0
+        true_pos = sorted(int(v) for v in points_true[i].cpu().numpy().tolist())
+        pred_pos = sorted(int(v) for v in top_pred[i].cpu().numpy().tolist())
+        if true_pos == pred_pos:
+            correct += 1
+    return correct / batch_size if batch_size > 0 else 0.0
 
 
-def calc_perturb_rmse(mask_true, perturb_true, perturb_pred):
+def calc_perturb_rmse(values_true, values_pred):
     """
     计算扰动值预测 RMSE
-    在真实扰动位置上，衡量 LBA 预测扰动值与 nVITA 真实扰动值的均方根误差
-    对应原论文的扰动拟合能力评估
+    回归头只输出 n 个值，与 nVITA 真实敏感点扰动值逐位对应
 
-    mask_true:    (batch, total_positions) 真实扰动掩码 (0/1)
-    perturb_true: (batch, total_positions) nVITA 真实扰动值
-    perturb_pred: (batch, total_positions) LBA 预测扰动值
+    values_true: (batch, n) nVITA 真实扰动值
+    values_pred: (batch, n) LBA 预测扰动值
     """
-    mask_bool = mask_true.bool()
-    if not mask_bool.any():
+    if values_true.numel() == 0:
         return 0.0
-    rmse = torch.sqrt(F.mse_loss(perturb_pred[mask_bool], perturb_true[mask_bool]))
+    rmse = torch.sqrt(F.mse_loss(values_pred.float(), values_true.float()))
     return rmse.item()
 
 
-def evaluate_lba_fitting_quality(lba_model, X_eval, mask_true, perturb_true, n, device, batch_size=64):
+def evaluate_lba_fitting_quality(lba_model, X_eval, points_true, values_true, n, device, batch_size=64, beta=1.0):
     """
     批量评估 LBA 模型的拟合质量，返回 AR 和扰动 RMSE
-    lba_model: 已训练的 LBA 模型
-    X_eval:    (N, seq_len, features) 评估集原始输入
-    mask_true: (N, total_positions)   nVITA 真实扰动掩码
-    perturb_true: (N, total_positions) nVITA 真实扰动值
+    lba_model:   已训练的 LBA 模型
+    X_eval:      (N, windows_cnt, features_cnt) 评估集原始输入
+    points_true: (N, n) nVITA 真实敏感点位置
+    values_true: (N, n) nVITA 真实扰动值(真实尺度，未归一化)
+    beta: 回归头输出的是归一化后的扰动值，需乘回 beta 还原为真实尺度后才能与
+           values_true 在同一尺度下计算 RMSE
     """
     lba_model.to(device)
     lba_model.eval()
     all_cls_logits = []
-    all_reg_values = []
+    all_atk_values = []
     N = X_eval.shape[0]
     with torch.no_grad():
         for start in range(0, N, batch_size):
             end = min(start + batch_size, N)
             X_batch = X_eval[start:end].to(device)
-            cls_logits, reg_values = lba_model(X_batch)
+            cls_logits, atk_values = lba_model(X_batch)
             all_cls_logits.append(cls_logits)
-            all_reg_values.append(reg_values)
+            all_atk_values.append(atk_values)
     all_cls_logits = torch.cat(all_cls_logits, dim=0)
-    all_reg_values = torch.cat(all_reg_values, dim=0)
+    all_atk_values = torch.cat(all_atk_values, dim=0)
+    all_atk_values_denorm = all_atk_values * beta  # 将归一化扰动值还原为真实尺度
 
-    ar = calc_sensitive_point_ar(mask_true, all_cls_logits, n)
-    perturb_rmse = calc_perturb_rmse(mask_true, perturb_true, all_reg_values)
+    ar = calc_sensitive_point_ar(points_true, all_cls_logits, n)
+    perturb_rmse = calc_perturb_rmse(values_true.to(device), all_atk_values_denorm)
     return ar, perturb_rmse
 
 
@@ -1279,11 +1331,12 @@ class NVITA:
     """
 
     def __init__(self, n, epsilon, model, feature_ranges, maxiter=60, pop_size=15,
-                 F=0.8, CR=0.9, targeted=False, feature_constraint=None, perturb_features=None):
+                 F=0.8, CR=0.9, targeted=False, feature_constraint=None, perturb_features=None,
+                 use_window_range=True):
         self.n = n                      # 总扰动点数
         self.epsilon = epsilon          # 扰动预算系数
         self.model = model
-        self.feature_ranges = feature_ranges  # 每个特征的全局取值范围 (numpy array)
+        self.feature_ranges = feature_ranges  # 全局特征取值范围回退值 (numpy array)
         self.maxiter = maxiter
         self.pop_size = pop_size
         self.F = F                      # DE 变异因子
@@ -1291,6 +1344,14 @@ class NVITA:
         self.targeted = targeted
         self.feature_constraint = feature_constraint  # 限定扰动特征数量
         self.perturb_features = perturb_features  # 精确指定要扰动的特征索引
+        # 对齐官方实现：以当前窗口内每个特征的极差 (np.ptp) 作为扰动预算基准
+        self.use_window_range = use_window_range
+
+    def _get_window_range(self, x_np):
+        """计算当前样本每个特征的窗口极差（对齐官方 calculate_test_window_ranges）"""
+        if not self.use_window_range:
+            return np.asarray(self.feature_ranges, dtype=float)
+        return np.ptp(x_np[0], axis=0).astype(float)
 
     def _sample_features(self, num_features):
         """根据约束采样允许扰动的特征索引"""
@@ -1309,7 +1370,7 @@ class NVITA:
             return np.arange(num_features)
         return np.random.choice(num_features, self.feature_constraint, replace=False)
 
-    def _init_individual(self, seq_len, num_features, allowed_features):
+    def _init_individual(self, seq_len, num_features, allowed_features, ranges):
         """初始化一个个体: n组 (时间步, 特征, 扰动值) 展平为 3n 维向量
         确保 n 个扰动点的 (时间步, 特征) 位置唯一，避免重复扰动
         """
@@ -1323,22 +1384,24 @@ class NVITA:
             pos_key = (t, f)
             if pos_key not in positions:
                 positions.add(pos_key)
-                budget = self.epsilon * self.feature_ranges[f]
-                p = np.random.uniform(-budget, budget)
+                budget = self.epsilon * ranges[f]
+                p = np.random.uniform(-budget, budget) if budget > 0 else 0.0
                 ind.extend([float(t), float(f), p])
             attempts += 1
         # 如果无法生成足够的唯一位置（极端情况），回退填充
         while len(positions) < self.n:
             t = np.random.randint(0, seq_len)
             f = int(np.random.choice(allowed_features))
-            budget = self.epsilon * self.feature_ranges[f]
-            p = np.random.uniform(-budget, budget)
+            budget = self.epsilon * ranges[f]
+            p = np.random.uniform(-budget, budget) if budget > 0 else 0.0
             ind.extend([float(t), float(f), p])
             positions.add((t, f))
         return np.array(ind)
 
     def _apply_perturbation(self, x_np, individual):
-        """将个体编码的扰动应用到输入样本上"""
+        """将个体编码的扰动应用到输入样本上
+        与官方实现一致：不对扰动后的输入做 [0,1] 截断
+        """
         x_adv = x_np.copy()
         seq_len = x_np.shape[1]
         num_features = x_np.shape[2]
@@ -1347,8 +1410,6 @@ class NVITA:
             f = int(np.clip(round(individual[3 * i + 1]), 0, num_features - 1))
             p = individual[3 * i + 2]
             x_adv[0, t, f] += p
-        # 截断到归一化范围 [0, 1]
-        x_adv = np.clip(x_adv, 0.0, 1.0)
         return x_adv
 
     def attack(self, X, y, seed=None):
@@ -1366,6 +1427,7 @@ class NVITA:
         seq_len = x_np.shape[1]
         num_features = x_np.shape[2]
         allowed_features = self._sample_features(num_features)
+        ranges = self._get_window_range(x_np)
 
         # 没有允许扰动的特征，直接返回原始输入
         if len(allowed_features) == 0:
@@ -1374,7 +1436,7 @@ class NVITA:
         # 初始化种群
         population = []
         for _ in range(self.pop_size):
-            population.append(self._init_individual(seq_len, num_features, allowed_features))
+            population.append(self._init_individual(seq_len, num_features, allowed_features, ranges))
         population = np.array(population)
 
         # 计算初始适应度
@@ -1406,7 +1468,7 @@ class NVITA:
                     mutant[3 * k + 1] = np.clip(round(mutant[3 * k + 1]), 0, num_features - 1)
                     f_idx = int(mutant[3 * k + 1])
                     # 扰动值截断到预算内
-                    budget = self.epsilon * self.feature_ranges[f_idx]
+                    budget = self.epsilon * ranges[f_idx]
                     mutant[3 * k + 2] = np.clip(mutant[3 * k + 2], -budget, budget)
 
                 # 2. 二项式交叉
@@ -1456,10 +1518,12 @@ class NVITA:
 # =============================================================================
 
 def run_nvita_attack(model, X_test, Y_test, beta, n, maxiter, tol, device,
-                     feature_ranges, feature_constraint=None, perturb_features=None, print_info=False):
+                     feature_ranges, feature_constraint=None, perturb_features=None, print_info=False,
+                     pop_size=15):
     """
     批量运行 nVITA 攻击，生成对抗样本
     beta: nVITA 扰动预算系数（原论文 β）
+    pop_size: DE 种群大小，默认对齐官方 15，可通过 LBA_CONFIG['pop_size'] 调整
     """
     model.to(device)
     model.eval()
@@ -1471,7 +1535,7 @@ def run_nvita_attack(model, X_test, Y_test, beta, n, maxiter, tol, device,
     nvita = NVITA(
         n=n, epsilon=beta, model=model,
         feature_ranges=feature_ranges,
-        maxiter=maxiter, targeted=False,
+        maxiter=maxiter, pop_size=pop_size, targeted=False,
         feature_constraint=feature_constraint,
         perturb_features=perturb_features
     )
@@ -1501,13 +1565,20 @@ def run_lba_attack(model, lba_model, X_test, Y_test, delta, n, device,
                    feature_constraint=None, perturb_features=None, print_info=False,
                    beta=0.1, feature_ranges=None):
     """
-    使用训练好的 LBA 模型执行批量攻击
-    delta: 扰动值缩放系数（原论文 δ）
+    使用训练好的 LBA 模型执行批量攻击（对齐 LearningBased_Atk/exp.py::LBA_attack）
+    位置解码: ind_feature, ind_window = po // windows_cnt, po % windows_cnt
+    扰动应用: 回归头输出的是训练时除以 beta 归一化后的扰动值，这里先乘回 beta 还原为真实
+    尺度，再乘以 delta 缩放系数后加到输入上: X_adv += delta * (perturbations * beta)，
+    与官方一致不限幅、不截断
+    命中"无攻击"类(po == windows_cnt * features_cnt)时跳过该点
+    
+    delta: 扰动值缩放系数（原论文 δ，官方代码中名为 beta）
     n: 选取的敏感点数量
     feature_constraint: 限定扰动特征数量
     perturb_features: 精确指定要扰动的特征索引
-    beta: nVITA 扰动预算系数（用于 LBA 扰动值限幅）
-    feature_ranges: 各特征取值范围（用于计算预算）
+    beta: nVITA 扰动预算系数，与 get_LBA_Dataset 中的归一化相对应，用于将回归头输出的
+           归一化扰动值还原为真实尺度（需与训练时传入 get_LBA_Dataset 的 beta 保持一致）
+    feature_ranges: 保留形参以兼容调用方，对齐官方后不再用于限幅
     """
     model.to(device)
     lba_model.to(device)
@@ -1518,13 +1589,14 @@ def run_lba_attack(model, lba_model, X_test, Y_test, delta, n, device,
     Y_adv_total = torch.empty(0).to(device)
     Y_pred_total = torch.empty(0).to(device)
 
-    seq_len = X_test.shape[1]
-    num_features = X_test.shape[2]
+    windows_cnt = X_test.shape[1]
+    features_cnt = X_test.shape[2]
+    no_attack_class = windows_cnt * features_cnt
 
     # 预处理精确扰动特征列表
     valid_perturb_features = None
     if perturb_features is not None:
-        valid_perturb_features = [f for f in perturb_features if 0 <= f < num_features]
+        valid_perturb_features = [f for f in perturb_features if 0 <= f < features_cnt]
 
     # 空列表表示不允许扰动任何特征
     if perturb_features is not None and len(perturb_features) == 0:
@@ -1543,46 +1615,39 @@ def run_lba_attack(model, lba_model, X_test, Y_test, delta, n, device,
             continue
 
         with torch.no_grad():
-            cls_logits, reg_values = lba_model(X_current)
+            output_cls, output_atk = lba_model(X_current)
 
-        # 如果指定了精确的扰动特征列表
+        # 特征约束：分类头前 features_cnt*windows_cnt 个 logits 按 feature-major 排列
+        # 掩码末位对应"无攻击"类，始终保留为可选
         if valid_perturb_features:
-            # 构造掩码: 只保留选中特征的位置
-            mask = torch.zeros_like(cls_logits)
-            mask_reshaped = mask.reshape(seq_len, num_features)
-            mask_reshaped[:, valid_perturb_features] = 1.0
-            # 非选中特征设为 -inf，不会被 topk 选中
-            cls_logits = cls_logits + (mask - 1) * 1e9
-        # 如果限定特征数量，则只在允许的特征内选点
-        elif feature_constraint is not None and feature_constraint < num_features:
+            pos_mask = torch.zeros(features_cnt, windows_cnt, device=output_cls.device)
+            pos_mask[valid_perturb_features, :] = 1.0
+            mask = torch.cat((pos_mask.reshape(1, -1),
+                              torch.ones(1, 1, device=output_cls.device)), dim=1)
+            output_cls = output_cls + (mask - 1) * 1e9
+        elif feature_constraint is not None and feature_constraint < features_cnt:
             # 选敏感度最高的 k 个特征
-            cls_reshaped = cls_logits.reshape(seq_len, num_features)
-            feat_sensitivity = cls_reshaped.sum(dim=0)
+            cls_reshaped = output_cls[0, :no_attack_class].reshape(features_cnt, windows_cnt)
+            feat_sensitivity = cls_reshaped.sum(dim=1)
             top_feats = torch.topk(feat_sensitivity, feature_constraint).indices
-            # 构造掩码: 只保留选中特征的位置
-            mask = torch.zeros_like(cls_logits)
-            mask_reshaped = mask.reshape(seq_len, num_features)
-            mask_reshaped[:, top_feats] = 1.0
-            # 非选中特征设为 -inf，不会被 topk 选中
-            cls_logits = cls_logits + (mask - 1) * 1e9
+            pos_mask = torch.zeros(features_cnt, windows_cnt, device=output_cls.device)
+            pos_mask[top_feats, :] = 1.0
+            mask = torch.cat((pos_mask.reshape(1, -1),
+                              torch.ones(1, 1, device=output_cls.device)), dim=1)
+            output_cls = output_cls + (mask - 1) * 1e9
 
         # 选取 Top-n 敏感点
-        _, top_indices = torch.topk(cls_logits, n, dim=1)
+        _, point = torch.topk(output_cls, n, dim=1)
+        perturbations = output_atk.detach()[0].cpu().numpy().tolist()
+        point = point[0].cpu().numpy().tolist()
 
         X_adv = X_current.clone()
-        for idx in top_indices[0]:
-            idx = idx.item()
-            t_idx = idx // num_features
-            f_idx = idx % num_features
-            perturb = delta * reg_values[0, idx].item()
-            # 扰动值限幅: 不超过 nVITA 预算的 delta 倍，防止缩放后扰动失控
-            if feature_ranges is not None:
-                budget = beta * feature_ranges[f_idx]
-                perturb = np.clip(perturb, -delta * budget, delta * budget)
-            X_adv[0, t_idx, f_idx] += perturb
-
-        # 截断到 [0, 1]
-        X_adv = torch.clamp(X_adv, 0.0, 1.0)
+        for ind, po in enumerate(point):
+            if po == no_attack_class:
+                continue
+            ind_feature, ind_window = po // windows_cnt, po % windows_cnt
+            real_perturb = perturbations[ind] * beta  # 将回归头输出的归一化扰动值还原为真实尺度
+            X_adv[0][ind_window][ind_feature] += delta * real_perturb
 
         with torch.no_grad():
             adv_pred = model(X_adv).item()
@@ -1646,10 +1711,10 @@ def evaluate_attack(model, X_test, Y_test, X_adv, min_speed, max_speed, attack_n
 # =============================================================================
 
 def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
-                     beta=0.1, n=1, maxiter=60, tol=0.01,
-                     adv_cnt=100, lba_epochs=50, lba_lr=0.001, lba_batch_size=25,
+                     beta=0.1, n=1, maxiter=60, tol=0.01, pop_size=15,
+                     adv_cnt=100, lba_epochs=50, lba_lr=0.005, lba_batch_size=25,
                      delta_list=None, use_bayesian=False,
-                     feature_constraint=None, perturb_features=None, print_info=True):
+                     feature_constraint=None, perturb_features=None, print_info=True, dir_weight=1.0):
     """
     完整 LBA 攻击管线（攻击目标为传入的 MoACB 模型）
     1. 拆分测试集为 LBA 训练子集 和 评估子集，严格隔离避免效果虚高
@@ -1662,13 +1727,14 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
     perturb_features: 精确指定要扰动的特征索引 (None=不限制)
     """
     if delta_list is None:
-        delta_list = [0.75, 1.0, 1.5, 1.75]
+        delta_list = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
 
     results = {}
     seq_len = X_test.shape[1]
     num_features = X_test.shape[2]
 
-    # 归一化后特征取值范围均为 [0,1]，极差=1
+    # 对齐官方实现，nVITA 预算基准改用每个样本窗口内的特征极差（在 NVITA 内部逐样本计算）
+    # 这里仅作为回退值传入
     feature_ranges = np.ones(num_features)
 
     print("\n" + "=" * 60)
@@ -1692,20 +1758,20 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
     X_test_att = X_test.to(device)
     Y_test_att = Y_test.to(device)
 
-    # ========== 关键修正: 拆分测试集为 LBA 训练子集 和 评估子集 ==========
+    # ========== 拆分测试集为 LBA 训练子集 和 评估子集 ==========
+    # 时序划分：前 adv_cnt 个样本用于训练 LBA，剩余样本用于评估
     total_num = X_test_att.shape[0]
-    indices = torch.randperm(total_num, device=device)
-    train_idx = indices[:adv_cnt]   # LBA 训练用样本
-    eval_idx = indices[adv_cnt:]    # 攻击效果评估用样本
+    train_idx = torch.arange(adv_cnt, device=device)
+    eval_idx = torch.arange(adv_cnt, total_num, device=device)
 
     X_lba_train = X_test_att[train_idx]
     Y_lba_train = Y_test_att[train_idx]
-    X_eval = X_test_att[eval_idx]
-    Y_eval = Y_test_att[eval_idx]
+    X_eval_att = X_test_att[eval_idx]
+    Y_eval_att = Y_test_att[eval_idx]
 
-    print(f"\n数据集拆分: 总计 {total_num} 个样本")
-    print(f"  LBA 训练子集: {len(train_idx)} 个样本")
-    print(f"  攻击评估子集: {len(eval_idx)} 个样本")
+    print(f"\n数据集拆分 (时序划分): 总计 {total_num} 个样本")
+    print(f"  LBA 训练子集: {len(train_idx)} 个样本 (索引 0~{adv_cnt - 1})")
+    print(f"  攻击评估子集: {len(eval_idx)} 个样本 (索引 {adv_cnt}~{total_num - 1})")
 
     # Step 1: 在训练子集上跑 nVITA，生成 LBA 训练数据
     print(f"\n[Step 1/4] nVITA 在 LBA 训练子集上生成对抗样本 (beta={beta}, n={n})...")
@@ -1714,28 +1780,37 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
         feature_ranges=feature_ranges,
         feature_constraint=feature_constraint,
         perturb_features=perturb_features,
-        print_info=print_info
+        print_info=print_info,
+        pop_size=pop_size
     )
 
-    # Step 2: 构建 LBA 训练数据集
+    # Step 2: 构建 LBA 训练数据集（逐样本提取敏感点位置与扰动值）
     print(f"\n[Step 2/4] 构建 LBA 训练集...")
-    lba_data = LBA_Dataset(device=device)
-    mask, perturb = build_lba_labels(X_adv_train, X_lba_train, device)
-    lba_data.add_sample(X_lba_train, mask, perturb)
+    lba_data = get_LBA_Dataset(X_lba_train, X_adv_train, n, device, beta=beta)
     print(f"  训练集大小: {len(lba_data)} 个样本")
+    # 诊断：训练子集上 nVITA 真实标签的方向分布，与评估子集对比，排查时序划分导致的分布漂移
+    _, train_values_true = build_sensitive_labels(X_adv_train, X_lba_train, n)
+    print_sign_distribution(train_values_true, "LBA训练子集(nVITA真实值)")
 
     # Step 3: 训练 LBA 模型
     print(f"\n[Step 3/4] 训练 LBA 模型 (epochs={lba_epochs}, lr={lba_lr}, bayesian={use_bayesian})...")
     lba_model = CNN_LBA_Model(num_features, seq_len, n, use_bayesian=use_bayesian)
-    train_lba_model(
+    loss_cls_list, loss_reg_list = train_lba_model(
         lba_data, lba_model,
         batch_size=lba_batch_size, learning_rate=lba_lr, epochs=lba_epochs,
-        device=device, print_info=print_info, n=n, use_bayesian=use_bayesian
+        device=device, print_info=print_info, n=n, use_bayesian=use_bayesian, dir_weight=dir_weight
     )
 
     lba_save_path = os.path.join(OUTPUT_DIR, 'LBA_models', 'lba_model_moacb_wsf.pt')
     torch.save(lba_model.state_dict(), lba_save_path)
     print(f"  LBA 模型已保存至: {lba_save_path}")
+
+    # 诊断：LBA 模型自身回归头在训练集上的预测方向分布，与训练真实标签对比，
+    # 排查是"训练集上就没学对方向"还是"训练集学对了、但对新样本泛化时失效"
+    lba_model.eval()
+    with torch.no_grad():
+        _, atk_train_pred = lba_model(X_lba_train.to(device))
+    print_sign_distribution(atk_train_pred, "LBA模型预测值(训练集)")
 
     # Step 4: 在评估子集上同时测试 nVITA 基线 和 LBA 攻击
     print(f"\n[Step 4/4] 在评估子集上对比攻击性能...")
@@ -1743,20 +1818,26 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
     # nVITA 基线攻击（在评估子集上）
     print(f"\n  --- nVITA Baseline (beta={beta}) on eval set ---")
     X_adv_nvita_eval, _, _ = run_nvita_attack(
-        model, X_eval, Y_eval, beta, n, maxiter, tol, device,
+        model, X_eval_att, Y_eval_att, beta, n, maxiter, tol, device,
         feature_ranges=feature_ranges,
         feature_constraint=feature_constraint,
         perturb_features=perturb_features,
-        print_info=print_info
+        print_info=print_info,
+        pop_size=pop_size
     )
     nvita_results = evaluate_attack(
-        model, X_eval, Y_eval, X_adv_nvita_eval,
+        model, X_eval_att, Y_eval_att, X_adv_nvita_eval,
         min_speed, max_speed, "nVITA (Baseline)", device
     )
     results['nVITA'] = nvita_results
 
-    # 构建 nVITA 真实扰动标签（用于评估 LBA 拟合能力）
-    eval_mask_true, eval_perturb_true = build_lba_labels(X_adv_nvita_eval, X_eval, device)
+    # 构建 nVITA 真实敏感点标签（用于评估 LBA 拟合能力）
+    eval_points_true, eval_values_true = build_sensitive_labels(X_adv_nvita_eval, X_eval_att, n)
+    print_sign_distribution(eval_values_true, "评估子集(nVITA真实值)")
+    # 诊断：LBA 模型自身回归头在评估集上的预测方向分布，与上面训练集的诊断对比
+    with torch.no_grad():
+        _, atk_eval_pred = lba_model(X_eval_att.to(device))
+    print_sign_distribution(atk_eval_pred, "LBA模型预测值(评估集)")
 
     # 用于可视化的原始数据缓存
     viz_data = {
@@ -1764,21 +1845,21 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
         'y_clean': None,
         'y_nvita': None,
         'y_lba': {},  # delta -> predictions
-        'X_clean': X_eval.clone(),
+        'X_clean': X_eval_att.clone(),
         'X_nvita': X_adv_nvita_eval.clone(),
         'X_lba': {},  # delta -> adv samples
         'feature_columns': ['风向', '理论功率', '实际功率', '风速'],
     }
     with torch.no_grad():
-        viz_data['y_true'] = Y_eval.cpu().numpy().flatten()
-        viz_data['y_clean'] = model(X_eval).cpu().numpy().flatten()
+        viz_data['y_true'] = Y_eval_att.cpu().numpy().flatten()
+        viz_data['y_clean'] = model(X_eval_att).cpu().numpy().flatten()
         viz_data['y_nvita'] = model(X_adv_nvita_eval).cpu().numpy().flatten()
 
     # LBA 攻击（在评估子集上）+ 拟合质量指标
     for delta in delta_list:
         print(f"\n  --- LBA Attack (delta={delta}) on eval set ---")
         X_adv_lba_eval, _, _ = run_lba_attack(
-            model, lba_model, X_eval, Y_eval, delta, n, device,
+            model, lba_model, X_eval_att, Y_eval_att, delta, n, device,
             feature_constraint=feature_constraint, perturb_features=perturb_features, print_info=False,
             beta=beta, feature_ranges=feature_ranges
         )
@@ -1788,13 +1869,13 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
         viz_data['X_lba'][delta] = X_adv_lba_eval.clone()
 
         lba_results = evaluate_attack(
-            model, X_eval, Y_eval, X_adv_lba_eval,
+            model, X_eval_att, Y_eval_att, X_adv_lba_eval,
             min_speed, max_speed, f"LBA (delta={delta})", device
         )
 
         # 计算 LBA 拟合质量指标：AR 和扰动 RMSE
         ar, perturb_rmse = evaluate_lba_fitting_quality(
-            lba_model, X_eval, eval_mask_true, eval_perturb_true, n, device
+            lba_model, X_eval_att, eval_points_true, eval_values_true, n, device, beta=beta
         )
         lba_results['sensitive_ar'] = ar
         lba_results['perturb_rmse'] = perturb_rmse
@@ -1818,10 +1899,12 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
     os.makedirs(os.path.join(OUTPUT_DIR, 'attack_figures'), exist_ok=True)
     viz_prefix = os.path.join(OUTPUT_DIR, 'attack_figures', f'beta{beta}_adv{adv_cnt}_')
     try:
+        plot_lba_training_loss(loss_cls_list, loss_reg_list, save_path=viz_prefix + 'lba_training_loss.png')
         plot_attack_effectiveness(results, save_path=viz_prefix + 'attack_effectiveness.png')
         plot_clean_vs_adv_predictions(viz_data, min_speed, max_speed,
                                       save_path=viz_prefix + 'clean_vs_adv_predictions.png')
         plot_perturbation_analysis(viz_data, save_path=viz_prefix + 'perturbation_analysis.png')
+        plot_lba_perturbation_sign_distribution(viz_data, save_path=viz_prefix + 'perturbation_sign_distribution.png')
         print(f"\n对抗攻击可视化图表已保存至: {os.path.join(OUTPUT_DIR, 'attack_figures')}/")
     except Exception as e:
         print(f"\n警告: 生成对抗攻击可视化图表时出错: {e}")
@@ -1834,6 +1917,38 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
 # SECTION 9b: 对抗攻击可视化函数
 # =============================================================================
 
+def plot_lba_training_loss(loss_cls_list, loss_reg_list, save_path=None):
+    """
+    绘制 LBA 模型训练过程中的损失曲线
+    左图：分类损失(敏感点定位 CrossEntropyLoss)随 epoch 变化
+    右图：回归损失(扰动值 MSELoss)随 epoch 变化
+    """
+    epochs_range = np.arange(1, len(loss_cls_list) + 1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle('LBA 模型训练损失曲线', fontsize=16, fontweight='bold')
+
+    ax1 = axes[0]
+    ax1.plot(epochs_range, loss_cls_list, 'o-', color='#2E86AB', linewidth=1.5, markersize=3)
+    ax1.set_xlabel('Epoch', fontsize=11)
+    ax1.set_ylabel('分类损失 (CrossEntropyLoss)', fontsize=11)
+    ax1.set_title('敏感点定位损失', fontsize=13)
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = axes[1]
+    ax2.plot(epochs_range, loss_reg_list, 's-', color='#A23B72', linewidth=1.5, markersize=3)
+    ax2.set_xlabel('Epoch', fontsize=11)
+    ax2.set_ylabel('回归损失 (MSELoss)', fontsize=11)
+    ax2.set_title('扰动值回归损失', fontsize=13)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  已保存: {save_path}")
+    plt.show()
+
+
 def plot_attack_effectiveness(results, save_path=None):
     """
     绘制攻击效果对比图：RMSE 下降率柱状图 + AR 折线图
@@ -1843,12 +1958,14 @@ def plot_attack_effectiveness(results, save_path=None):
     drop_rates = []
     ar_values = []
     rmse_adv_values = []
+    perturb_rmse_values = []
 
     for key, val in results.items():
         methods.append(val['attack_name'])
         drop_rates.append(val['drop_rmse_pct'])
         rmse_adv_values.append(val['rmse_adv'])
         ar_values.append(val.get('sensitive_ar', None))
+        perturb_rmse_values.append(val.get('perturb_rmse', None))
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     fig.suptitle('LBA 与 nVITA 攻击效果对比', fontsize=16, fontweight='bold')
@@ -1873,23 +1990,38 @@ def plot_attack_effectiveness(results, save_path=None):
                      textcoords="offset points", ha='center', va='bottom' if height >= 0 else 'top',
                      fontsize=9)
 
-    # 右图：AR 指标（仅 LBA 方法有）
+    # 右图：AR（敏感点定位准确率）+ 扰动值 RMSE（扰动幅值拟合误差），双 y 轴对比
     ax2 = axes[1]
     lba_methods = [m for m, ar in zip(methods, ar_values) if ar is not None]
     lba_ar = [ar for ar in ar_values if ar is not None]
+    lba_pr = [pr for pr in perturb_rmse_values if pr is not None]
     if lba_ar:
-        ax2.plot(lba_methods, lba_ar, 'o-', color='#F18F01', linewidth=2, markersize=8, label='敏感点准确率 AR')
+        line1 = ax2.plot(lba_methods, lba_ar, 'o-', color='#F18F01', linewidth=2, markersize=8,
+                          label='敏感点准确率 AR')
         ax2.set_ylim(0, 1.05)
-        ax2.set_ylabel('AR (Accuracy Rate)', fontsize=12)
-        ax2.set_title('LBA 敏感点预测准确率', fontsize=14)
+        ax2.set_ylabel('AR (Accuracy Rate)', fontsize=12, color='#F18F01')
+        ax2.set_title('LBA 拟合质量: 敏感点定位 AR 与扰动幅值 RMSE', fontsize=14)
         ax2.tick_params(axis='x', rotation=30)
+        ax2.tick_params(axis='y', labelcolor='#F18F01')
         ax2.grid(True, alpha=0.3)
-        ax2.legend()
         for i, (m, ar) in enumerate(zip(lba_methods, lba_ar)):
             ax2.annotate(f'{ar:.3f}', xy=(i, ar), xytext=(0, 10),
-                         textcoords="offset points", ha='center', fontsize=9)
+                         textcoords="offset points", ha='center', fontsize=9, color='#F18F01')
+
+        lines = line1
+        if lba_pr and len(lba_pr) == len(lba_methods):
+            ax2b = ax2.twinx()
+            line2 = ax2b.plot(lba_methods, lba_pr, 's--', color='#6A0DAD', linewidth=2, markersize=8,
+                               label='扰动值 RMSE')
+            ax2b.set_ylabel('扰动值 RMSE (归一化空间)', fontsize=12, color='#6A0DAD')
+            ax2b.tick_params(axis='y', labelcolor='#6A0DAD')
+            for i, (m, pr) in enumerate(zip(lba_methods, lba_pr)):
+                ax2b.annotate(f'{pr:.4f}', xy=(i, pr), xytext=(0, -15),
+                              textcoords="offset points", ha='center', fontsize=9, color='#6A0DAD')
+            lines = line1 + line2
+        ax2.legend(lines, [l.get_label() for l in lines], loc='best')
     else:
-        ax2.text(0.5, 0.5, '无 AR 数据', transform=ax2.transAxes, ha='center', va='center', fontsize=12)
+        ax2.text(0.5, 0.5, '无 AR/RMSE 数据', transform=ax2.transAxes, ha='center', va='center', fontsize=12)
 
     plt.tight_layout()
     if save_path:
@@ -1989,9 +2121,10 @@ def plot_perturbation_analysis(viz_data, save_path=None):
     ax1.legend(fontsize=10)
     ax1.grid(True, axis='y', alpha=0.3)
 
-    # 右图：扰动分布箱线图（只取第一个特征作为示例，避免图太乱）
+    # 右图：扰动分布筱线图（全部展平的绝对差值，与 LBA 维度对齐）
     ax2 = axes[1]
-    perturb_data = [nvita_perturb]
+    nvita_flat = (viz_data['X_nvita'] - viz_data['X_clean']).abs().cpu().numpy().flatten()
+    perturb_data = [nvita_flat]
     labels = ['nVITA']
     for delta in sorted(viz_data['X_lba'].keys()):
         diff = (viz_data['X_lba'][delta] - viz_data['X_clean']).abs().cpu().numpy().flatten()
@@ -2006,6 +2139,88 @@ def plot_perturbation_analysis(viz_data, save_path=None):
     ax2.set_title('扰动幅值分布箱线图', fontsize=14)
     ax2.tick_params(axis='x', rotation=30)
     ax2.grid(True, axis='y', alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  已保存: {save_path}")
+    plt.show()
+
+
+def plot_lba_perturbation_sign_distribution(viz_data, save_path=None):
+    """
+    绘制扰动值符号(正负)分布图。
+    与 plot_perturbation_analysis 只展示绝对幅值不同，本图保留扰动值的正负号，
+    用于观察各攻击方法/各特征上扰动方向(增大/减小)的分布规律：
+    - 左图：各特征上的平均带符号扰动幅值（正=特征被增大，负=特征被减小）
+    - 右图：只取实际被扰动的位置(diff != 0)，绘制带符号扰动值分布箱线图，
+            并标注正/负扰动样本占比
+    """
+    feature_columns = viz_data['feature_columns']
+    num_features = len(feature_columns)
+
+    def mean_signed_perturb(X_adv, X_clean):
+        diff = (X_adv - X_clean).cpu().numpy()  # (N, seq_len, num_features)
+        return diff.mean(axis=(0, 1))  # (num_features,) 保留正负号
+
+    def nonzero_signed_perturb(X_adv, X_clean):
+        diff = (X_adv - X_clean).cpu().numpy().flatten()
+        nz = diff[diff != 0]
+        return nz if len(nz) > 0 else np.array([0.0])
+
+    nvita_signed = mean_signed_perturb(viz_data['X_nvita'], viz_data['X_clean'])
+    nvita_nz = nonzero_signed_perturb(viz_data['X_nvita'], viz_data['X_clean'])
+    sorted_deltas = sorted(viz_data['X_lba'].keys())
+    colors_lba = ['#A23B72', '#F18F01', '#C73E1D', '#3B1F2B', '#6A0DAD', '#118AB2', '#EF476F', '#06D6A0']
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    fig.suptitle('LBA/nVITA 扰动值符号(正负)分布分析', fontsize=16, fontweight='bold')
+
+    # 左图：各特征上的平均带符号扰动幅值
+    ax1 = axes[0]
+    x_pos = np.arange(num_features)
+    width = 0.15
+    ax1.bar(x_pos - width, nvita_signed, width, label='nVITA', color='#2E86AB', alpha=0.8, edgecolor='black')
+    for i, delta in enumerate(sorted_deltas):
+        lba_signed = mean_signed_perturb(viz_data['X_lba'][delta], viz_data['X_clean'])
+        ax1.bar(x_pos + i * width, lba_signed, width,
+                label=f'LBA (δ={delta})', color=colors_lba[i % len(colors_lba)], alpha=0.8, edgecolor='black')
+    ax1.axhline(y=0, color='red', linestyle='--', linewidth=1.2, label='零扰动基线')
+    ax1.set_ylabel('平均带符号扰动幅值', fontsize=12)
+    ax1.set_title('各特征上的平均扰动方向与幅值\n(正=特征被增大, 负=特征被减小)', fontsize=13)
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(feature_columns, rotation=15)
+    ax1.legend(fontsize=9)
+    ax1.grid(True, axis='y', alpha=0.3)
+
+    # 右图：实际被扰动位置的带符号扰动值分布箱线图 + 正/负占比标注
+    ax2 = axes[1]
+    perturb_data = [nvita_nz]
+    labels = ['nVITA']
+    for delta in sorted_deltas:
+        nz = nonzero_signed_perturb(viz_data['X_lba'][delta], viz_data['X_clean'])
+        perturb_data.append(nz)
+        labels.append(f'LBA δ={delta}')
+
+    bp = ax2.boxplot(perturb_data, labels=labels, patch_artist=True, showmeans=True)
+    for patch, color in zip(bp['boxes'], ['#2E86AB'] + colors_lba[:len(bp['boxes']) - 1]):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    ax2.axhline(y=0, color='red', linestyle='--', linewidth=1.5, label='零扰动基线')
+    ax2.set_ylabel('带符号扰动值(归一化空间)', fontsize=12)
+    ax2.set_title('实际被扰动位置的带符号扰动值分布', fontsize=13)
+    ax2.tick_params(axis='x', rotation=30)
+    ax2.legend(fontsize=9)
+    ax2.grid(True, axis='y', alpha=0.3)
+
+    # 在每组箱线图上方标注正/负样本占比
+    y_top = ax2.get_ylim()[1]
+    for i, vals in enumerate(perturb_data):
+        pos_ratio = np.mean(vals > 0) * 100
+        neg_ratio = np.mean(vals < 0) * 100
+        ax2.annotate(f'+{pos_ratio:.0f}% / -{neg_ratio:.0f}%',
+                     xy=(i + 1, y_top), xytext=(0, -14), textcoords='offset points',
+                     ha='center', fontsize=8, color='black')
 
     plt.tight_layout()
     if save_path:
@@ -2176,12 +2391,18 @@ def main():
     parser = argparse.ArgumentParser(description='MoACB-WSF with LBA Adversarial Attack')
     parser.add_argument('--data_file', type=str, default='winddata.xlsx', help='Input data file')
     parser.add_argument('--no_attack', action='store_true', help='Skip LBA attack evaluation')
-    parser.add_argument('--beta', type=float, default=0.1, help='nVITA perturbation budget (原论文 β)')
-    parser.add_argument('--n_perturb', type=int, default=1, help='Number of perturbations (nVITA)')
-    parser.add_argument('--lba_epochs', type=int, default=50, help='LBA training epochs')
-    parser.add_argument('--lba_lr', type=float, default=0.001, help='LBA learning rate')
-    parser.add_argument('--adv_cnt', type=int, default=100, help='Adv examples for LBA training')
-    parser.add_argument('--delta_list', type=float, nargs='+', default=[0.75, 1.0, 1.5, 1.75],
+    # 以下超参数均以 LBA_CONFIG 为唯一默认值来源，避免出现与 LBA_CONFIG 不同步的"死配置"；
+    # 命令行传参仍可临时覆盖，不传参时一律生效 LBA_CONFIG 中的设置
+    parser.add_argument('--beta', type=float, default=LBA_CONFIG['beta'], help='nVITA perturbation budget (原论文 β)')
+    parser.add_argument('--n_perturb', type=int, default=LBA_CONFIG['n'], help='Number of perturbations (nVITA)')
+    parser.add_argument('--lba_epochs', type=int, default=LBA_CONFIG['lba_epochs'], help='LBA training epochs')
+    parser.add_argument('--lba_lr', type=float, default=LBA_CONFIG['lba_lr'], help='LBA learning rate')
+    parser.add_argument('--adv_cnt', type=int, default=LBA_CONFIG['adv_cnt'], help='Adv examples for LBA training')
+    parser.add_argument('--pop_size', type=int, default=LBA_CONFIG['pop_size'],
+                        help='DE population size for nVITA (官方默认 15，增大可提升搜索覆盖度但耐时增加)')
+    parser.add_argument('--dir_weight', type=float, default=LBA_CONFIG['dir_weight'],
+                        help='Direction-consistency penalty weight for LBA regression loss (0 = disable)')
+    parser.add_argument('--delta_list', type=float, nargs='+', default=LBA_CONFIG['delta_list'],
                         help='LBA delta values (原论文 δ)')
     parser.add_argument('--use_bayesian', action='store_true', default=LBA_CONFIG['use_bayesian'], help='Use BayesianConv1d (requires blitz)')
     parser.add_argument('--feat_constraint', type=int, default=LBA_CONFIG['feature_constraint'],
@@ -2262,10 +2483,26 @@ def main():
     feature_columns = data_result['feature_columns']
 
     # Extract test data for attack evaluation
+    # LBA 数据池 = 验证集(15%) + 测试集(15%)，按时序拼接
     test_loader_for_attack = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False)
     X_test_full, Y_test_full = next(iter(test_loader_for_attack))
     X_test_full = X_test_full.to(DEVICE)
     Y_test_full = Y_test_full.to(DEVICE)
+
+    val_loader_for_attack = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False)
+    X_val_full, Y_val_full = next(iter(val_loader_for_attack))
+    X_val_full = X_val_full.to(DEVICE)
+    Y_val_full = Y_val_full.to(DEVICE)
+
+    X_lba_pool = torch.cat([X_val_full, X_test_full], dim=0)
+    Y_lba_pool = torch.cat([Y_val_full, Y_test_full], dim=0)
+    # adv_cnt 现完全取自 LBA_CONFIG['adv_cnt']/--adv_cnt（不再是固定的 0.8 比例），防止出现“死配置”；
+    # 仍需保留至少 1 个评估样本，过大时自动限幅并提醒
+    adv_cnt_auto = min(args.adv_cnt, len(X_lba_pool) - 1)
+    if adv_cnt_auto != args.adv_cnt:
+        print(f"\n>>> 警告: --adv_cnt={args.adv_cnt} 超出数据池范围，已自动限幅为 {adv_cnt_auto}")
+    print(f"\n[LBA 数据池] 验证集 {len(X_val_full)} + 测试集 {len(X_test_full)} = 总计 {len(X_lba_pool)} 个样本")
+    print(f"[LBA 数据池] 时序划分：前 {adv_cnt_auto} 个训练 LBA，后 {len(X_lba_pool) - adv_cnt_auto} 个用于评估")
 
     # ====== 新增: 判断是否触发 load_model 模式 ======
     load_model_mode = args.load_model is not None and os.path.isfile(args.load_model)
@@ -2525,15 +2762,17 @@ def main():
             print(f"{'=' * 80}")
 
             lba_results, lba_model, X_adv_nvita = run_lba_pipeline(
-                model, X_test_full, Y_test_full, min_speed, max_speed, DEVICE,
+                model, X_lba_pool, Y_lba_pool, min_speed, max_speed, DEVICE,
                 beta=args.beta, n=args.n_perturb,
                 maxiter=LBA_CONFIG['maxiter'], tol=LBA_CONFIG['tol'],
-                adv_cnt=args.adv_cnt, lba_epochs=args.lba_epochs,
+                pop_size=args.pop_size,
+                adv_cnt=adv_cnt_auto, lba_epochs=args.lba_epochs,
                 lba_lr=args.lba_lr, lba_batch_size=LBA_CONFIG['lba_batch_size'],
                 delta_list=args.delta_list, use_bayesian=args.use_bayesian,
                 feature_constraint=args.feat_constraint,
                 perturb_features=args.perturb_features,
-                print_info=True
+                print_info=True,
+                dir_weight=args.dir_weight
             )
 
             # Save LBA results
