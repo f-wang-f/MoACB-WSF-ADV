@@ -6,7 +6,7 @@ LBA-MOACB-WSF with Fixed Manual Encoding
 
 说明：本文件代码结构与 LBA-MOACB-WSF.py 保持一致，仅将 NSGA-II 模型搜索替换为固定编码。
 - 编码向量：论文表 "BEST TRADE-OFF HYBRID ENCODING VECTORS OBTAINED BY THE PROPOSED MoACB-WSF"
-- nVITA：标准 DE/rand/1/bin 差分进化稀疏黑盒攻击
+- nVITA：NSGA-II 双目标稀疏黑盒对抗攻击（L2 范数 + -RSE Pareto 多目标优化）
 - LBA：双分支CNN学习攻击模式，支持扰动特征数量约束
 
 原文件 LBA-MOACB-WSF.py 完全保留，两个文件并存。
@@ -119,18 +119,18 @@ BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 #   beta: nVITA 的扰动预算系数（原论文中的 β）
 #   delta: LBA 生成扰动时的缩放系数（原论文中的 δ）
 LBA_CONFIG = {
-    'n': 1,  # number of perturbations per sample
+    'enable_lba': False,  # ★ LBA 学习式攻击总开关：True=启用完整 LBA 管线；False=封存 LBA（仅运行 nVITA/NSGA-II 攻击）。命令行 --enable_lba/--disable_lba 可临时覆盖此配置
+    'n': 3,  # number of perturbations per sample
     'beta': 0.3,  # nVITA perturbation budget factor (原论文 β)
-    'maxiter': 100,  # DE max iterations for nVITA baseline
-    'pop_size': 30,  # DE population size for nVITA baseline（官方默认 15，增大可提升搜索覆盖度，但每代计算量线性增加）
-    'tol': 0.01,  # tolerance for nVITA
-    'adv_cnt': 268,  # number of adv examples for LBA training
-    'lba_epochs': 70,  # LBA model training epochs
+    'maxiter': 40,  # NSGA-II max generations for nVITA baseline
+    'pop_size': 30,  # NSGA-II population size for nVITA baseline（官方 DE 版默认 15，增大可提升搜索覆盖度，但每代计算量线性增加）
+    'adv_cnt': 2516,  # number of adv examples for LBA training（前 N 个训练，后 336-N 个评估；当前 236 → 评估样本 100）
+    'lba_epochs': 50,  # LBA model training epochs
     'lba_lr': 0.001,  # LBA model learning rate
     'lba_batch_size': 16,  # LBA model batch size (对齐官方实现默认值)
     'delta_list': [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0],  # LBA attack scaling factors (原论文 δ)
     'use_bayesian': False   ,  # 启用贝叶斯卷积层，提升泛化性和不确定性估计
-    'perturb_mask': '0100',  # 二进制掩码字符串，指定要扰动的特征
+    'perturb_mask': '1111',  # 二进制掩码字符串，指定要扰动的特征
                              # 例如'0010'表示只扰动第3个特征(0-based索引2)
                              # '1111'表示扰动所有4个特征
     'feature_constraint': None,  # 扰动特征数量约束 (None=不限制, 整数=限定特征数)
@@ -1320,32 +1320,43 @@ def evaluate_lba_fitting_quality(lba_model, X_eval, points_true, values_true, n,
 
 
 # =============================================================================
-# SECTION 7: nVITA BASELINE ATTACK (差分进化实现)
+# SECTION 7: NVITA_NSGA2 - NSGA-II 双目标稀疏对抗攻击
+# =============================================================================
+# 基于 NSGA-II 的 nVITA 稀疏黑盒攻击，同时优化两个目标:
+#   目标1(最小化): 扰动 L2 范数——值越小，扰动越隐蔽、越难检测
+#   目标2(最小化): -RSE，其中 RSE = sqrt(攻击后MSE / 干净预测MSE)
+#   等价于最大化攻击导致的 RMSE 相对上升率；RSE 越大代表攻击效果越强
+# 完全保留原 nVITA 的三元组稀疏编码、动态扰动预算、特征约束等功能
 # =============================================================================
 
-class NVITA:
+
+class NVITA_NSGA2:
     """
-    n-Values Time Series Attack (nVITA)
-    基于差分进化 DE/rand/1/bin 的稀疏黑盒攻击
-    支持特征数量约束: feature_constraint=None 表示无约束，整数表示限定扰动的特征数
+    基于 NSGA-II 的双目标稀疏黑盒对抗攻击
+    编码方式：n组 (时间步t, 特征f, 扰动值p) 展平为 3n 维向量
+    双目标（最小化）：
+        obj[0] = ||p||_2  （扰动 L2 范数）
+        obj[1] = -RSE     （RSE = sqrt(攻击后MSE / 干净预测MSE)）
+    完全保留原 nVITA 的三元组编码、动态窗口极差预算、特征约束等功能
     """
 
-    def __init__(self, n, epsilon, model, feature_ranges, maxiter=60, pop_size=15,
-                 F=0.8, CR=0.9, targeted=False, feature_constraint=None, perturb_features=None,
-                 use_window_range=True):
-        self.n = n                      # 总扰动点数
+    def __init__(self, n, epsilon, model, feature_ranges, maxiter=60, pop_size=30,
+                 eta_c=15, eta_m=20, crossover_prob=0.9,
+                 feature_constraint=None, perturb_features=None,
+                 use_window_range=True, init_strategy='random'):
+        self.n = n                      # 最大扰动点数
         self.epsilon = epsilon          # 扰动预算系数
         self.model = model
-        self.feature_ranges = feature_ranges  # 全局特征取值范围回退值 (numpy array)
+        self.feature_ranges = feature_ranges  # 全局特征取值范围回退值
         self.maxiter = maxiter
         self.pop_size = pop_size
-        self.F = F                      # DE 变异因子
-        self.CR = CR                    # DE 交叉概率
-        self.targeted = targeted
-        self.feature_constraint = feature_constraint  # 限定扰动特征数量
-        self.perturb_features = perturb_features  # 精确指定要扰动的特征索引
-        # 对齐官方实现：以当前窗口内每个特征的极差 (np.ptp) 作为扰动预算基准
+        self.eta_c = eta_c              # SBX 分布指数
+        self.eta_m = eta_m              # PM 多项式变异分布指数
+        self.crossover_prob = crossover_prob
+        self.feature_constraint = feature_constraint
+        self.perturb_features = perturb_features
         self.use_window_range = use_window_range
+        self.init_strategy = init_strategy  # 'random' / 'sensitivity'
 
     def _get_window_range(self, x_np):
         """计算当前样本每个特征的窗口极差（对齐官方 calculate_test_window_ranges）"""
@@ -1355,17 +1366,12 @@ class NVITA:
 
     def _sample_features(self, num_features):
         """根据约束采样允许扰动的特征索引"""
-        # 如果指定了精确的扰动特征列表
         if self.perturb_features is not None:
-            # 验证特征索引是否有效
             valid_features = [f for f in self.perturb_features if 0 <= f < num_features]
             if valid_features:
                 return np.array(valid_features)
-            # 空列表表示不允许扰动任何特征
             if len(self.perturb_features) == 0:
                 return np.array([], dtype=int)
-            # 如果没有有效特征，回退到允许所有特征
-        # 原有的数量约束逻辑
         if self.feature_constraint is None or self.feature_constraint >= num_features:
             return np.arange(num_features)
         return np.random.choice(num_features, self.feature_constraint, replace=False)
@@ -1388,7 +1394,6 @@ class NVITA:
                 p = np.random.uniform(-budget, budget) if budget > 0 else 0.0
                 ind.extend([float(t), float(f), p])
             attempts += 1
-        # 如果无法生成足够的唯一位置（极端情况），回退填充
         while len(positions) < self.n:
             t = np.random.randint(0, seq_len)
             f = int(np.random.choice(allowed_features))
@@ -1399,24 +1404,245 @@ class NVITA:
         return np.array(ind)
 
     def _apply_perturbation(self, x_np, individual):
-        """将个体编码的扰动应用到输入样本上
-        与官方实现一致：不对扰动后的输入做 [0,1] 截断
+        """将个体编码的扰动应用到输入样本上（检测重复 (t,f) 并合并幅值）
+        交叉/变异后两个三元组可能落到同一位置，此处合并幅值避免重复计数，
+        保证实际扰动点数 ≤ n，L0 稀疏性诚实反映。
         """
         x_adv = x_np.copy()
         seq_len = x_np.shape[1]
         num_features = x_np.shape[2]
+
+        # 检测重复位置并合并幅值
+        perturbation_map = {}
         for i in range(self.n):
             t = int(np.clip(round(individual[3 * i]), 0, seq_len - 1))
             f = int(np.clip(round(individual[3 * i + 1]), 0, num_features - 1))
             p = individual[3 * i + 2]
+            key = (t, f)
+            if key in perturbation_map:
+                perturbation_map[key] += p  # 合并幅值
+            else:
+                perturbation_map[key] = p
+
+        # 应用合并后的扰动
+        for (t, f), p in perturbation_map.items():
             x_adv[0, t, f] += p
+
         return x_adv
+
+    def _evaluate_objectives(self, x_np, y_val, individual, device):
+        """计算双目标：
+        目标1: 扰动 L₂ 范数（所有扰动值的平方和开根号）
+        目标2: 1/RSE（RSE = sqrt(攻击后MSE / 干净预测MSE)）
+        两目标均最小化，理想点收敛到原点 (0, 0)
+        """
+        x_adv = self._apply_perturbation(x_np, individual)
+        with torch.no_grad():
+            pred_adv = self.model(torch.FloatTensor(x_adv).to(device)).item()
+            pred_clean = self.model(torch.FloatTensor(x_np).to(device)).item()
+
+        # 目标1: 扰动 L₂ 范数
+        p_vals = individual[2::3]
+        l2_norm = np.sqrt(np.sum(p_vals ** 2))
+
+        # 目标2: 1/RSE（RSE 的倒数，越小越好）
+        adv_mse = (pred_adv - y_val) ** 2
+        clean_mse = (pred_clean - y_val) ** 2
+        rse = np.sqrt(adv_mse / clean_mse) if clean_mse > 1e-10 else 10.0
+        inv_rse = 1.0 / rse
+
+        return np.array([l2_norm, inv_rse])
+
+    @staticmethod
+    def _fast_non_dominated_sort(objectives):
+        """快速非支配排序（最小化问题）
+        支配规则：个体 i 支配 j 当且仅当 i 的所有目标 <= j 且至少一个目标 < j
+        返回值：(fronts, rank)
+            fronts: list of list，每层 Pareto 前沿的索引列表
+            rank: array，每个个体的非支配层级（0 为最优）
+        """
+        pop_size = objectives.shape[0]
+        domination_count = np.zeros(pop_size, dtype=int)
+        dominated_set = [[] for _ in range(pop_size)]
+
+        for i in range(pop_size):
+            for j in range(pop_size):
+                if i == j:
+                    continue
+                dominates = np.all(objectives[i] <= objectives[j]) and np.any(objectives[i] < objectives[j])
+                if dominates:
+                    dominated_set[i].append(j)
+                elif np.all(objectives[j] <= objectives[i]) and np.any(objectives[j] < objectives[i]):
+                    domination_count[i] += 1
+
+        fronts = []
+        current_front = [i for i in range(pop_size) if domination_count[i] == 0]
+        rank = np.full(pop_size, -1)
+
+        front_level = 0
+        while current_front:
+            fronts.append(current_front)
+            for i in current_front:
+                rank[i] = front_level
+            next_front = []
+            for i in current_front:
+                for j in dominated_set[i]:
+                    domination_count[j] -= 1
+                    if domination_count[j] == 0:
+                        next_front.append(j)
+            current_front = next_front
+            front_level += 1
+
+        return fronts, rank
+
+    @staticmethod
+    def _crowding_distance(objectives, fronts):
+        """拥挤距离计算
+        每个目标按自身值域做归一化，避免量纲差异导致某一目标主导选择结果
+        边界点距离设为无穷大，优先保留边界解
+        """
+        pop_size = objectives.shape[0]
+        n_obj = objectives.shape[1]
+        distance = np.zeros(pop_size)
+
+        for front in fronts:
+            if len(front) <= 2:
+                distance[front] = np.inf
+                continue
+            front_size = len(front)
+            front_obj = objectives[front]
+            obj_ranges = np.max(front_obj, axis=0) - np.min(front_obj, axis=0)
+            obj_ranges[obj_ranges < 1e-10] = 1.0
+
+            for m in range(n_obj):
+                front_arr = np.array(front)
+                sorted_indices = front_arr[np.argsort(front_obj[:, m])]
+                distance[sorted_indices[0]] = np.inf
+                distance[sorted_indices[-1]] = np.inf
+                for i in range(1, front_size - 1):
+                    idx = sorted_indices[i]
+                    prev_idx = sorted_indices[i - 1]
+                    next_idx = sorted_indices[i + 1]
+                    distance[idx] += (objectives[next_idx, m] - objectives[prev_idx, m]) / obj_ranges[m]
+
+        return distance
+
+    @staticmethod
+    def _tournament_selection(population, objectives, rank, crowding, pop_size):
+        """二元锦标赛选择
+        第一优先级：非支配层级 rank（越小越优）
+        第二优先级：拥挤距离（越大越优，维持种群多样性）
+        """
+        n = population.shape[0]
+        selected = []
+        while len(selected) < pop_size:
+            i, j = np.random.choice(n, 2, replace=False)
+            if rank[i] < rank[j]:
+                selected.append(population[i].copy())
+            elif rank[j] < rank[i]:
+                selected.append(population[j].copy())
+            elif crowding[i] > crowding[j]:
+                selected.append(population[i].copy())
+            else:
+                selected.append(population[j].copy())
+        return np.array(selected)
+
+    def _usx_crossover(self, parent1, parent2, seq_len, num_features, ranges):
+        """均匀集合交叉（Uniform Set Crossover, USX）
+        SA-MOO 风格集合式交叉：以整个三元组 (t,f,p) 为最小交换单位，
+        随机选取若干三元组整体互换，彻底规避整数位「加权平均→取整→变回原值」的无效交叉。
+        稀疏攻击的个体本质是 n 个扰动点组成的无序集合，而非线性连续向量。
+        参数：crossover_prob = 0.9（eta_c 分布指数保留接口兼容，集合式交叉不再使用）
+        """
+        if np.random.random() > self.crossover_prob:
+            return parent1.copy(), parent2.copy()
+
+        child1 = parent1.copy()
+        child2 = parent2.copy()
+
+        # 随机确定本次交换的三元组数量（至少 1 个）
+        swap_num = np.random.randint(1, self.n + 1)
+        # 从 0~n-1 中不重复采样待交换的三元组序号
+        swap_indices = np.random.choice(self.n, size=swap_num, replace=False)
+
+        # 以整个三元组为单位互换
+        for k in swap_indices:
+            base = 3 * k
+            child1[base:base + 3], child2[base:base + 3] = (
+                parent2[base:base + 3].copy(), parent1[base:base + 3].copy()
+            )
+
+        # 合法性修正：t/f 取整截断，p 按动态预算截断
+        for child in [child1, child2]:
+            for k in range(self.n):
+                child[3 * k] = float(np.clip(round(child[3 * k]), 0, seq_len - 1))
+                child[3 * k + 1] = float(np.clip(round(child[3 * k + 1]), 0, num_features - 1))
+                f_idx = int(child[3 * k + 1])
+                budget = self.epsilon * ranges[f_idx]
+                child[3 * k + 2] = np.clip(child[3 * k + 2], -budget, budget)
+
+        return child1, child2
+
+    def _polynomial_mutation(self, individual, seq_len, num_features, ranges, allowed_features=None):
+        """分维度定制变异（SA-MOO 风格集合式变异）
+        逐三元组独立处理，三个维度采用最适配的策略：
+        t（离散时间步）: 15% 触发，70% 邻域±1步移动（时序局部相关性，扰动更平滑）+ 30% 全局重采样
+        f（离散特征）  : 15% 触发，从 allowed_features 中均匀重采样（遵守特征约束，避免小步变化被 round 抹掉）
+        p（连续幅值）  : 1/n 触发，保留标准 PM 多项式变异（eta_m 分布指数沿用），按动态预算截断
+        allowed_features: 允许扰动的特征索引列表，None 时退化为全特征采样
+        """
+        mutant = individual.copy()
+
+        for k in range(self.n):
+            base = 3 * k
+
+            # (1) 时间步 t 变异（每个三元组独立判断，触发概率 15%）
+            if np.random.random() < 0.15:
+                t_cur = int(round(mutant[base]))
+                if np.random.random() < 0.7:
+                    # 70%：邻域 ±1 步移动
+                    t_new = t_cur + np.random.choice([-1, 1])
+                else:
+                    # 30%：全局重采样
+                    t_new = np.random.randint(0, seq_len)
+                mutant[base] = float(np.clip(t_new, 0, seq_len - 1))
+
+            # (2) 特征 f 变异（每个三元组独立判断，触发概率 15%）
+            if np.random.random() < 0.15:
+                if allowed_features is not None and len(allowed_features) > 0:
+                    mutant[base + 1] = float(np.random.choice(allowed_features))
+                else:
+                    mutant[base + 1] = float(np.random.randint(0, num_features))
+
+            # (3) 扰动值 p 变异（触发概率 1/n，平均每次变异 1 个幅值）
+            if np.random.random() < 1.0 / self.n:
+                u = np.random.random()
+                if u <= 0.5:
+                    delta = (2 * u) ** (1.0 / (self.eta_m + 1.0)) - 1.0
+                else:
+                    delta = 1.0 - (2.0 * (1.0 - u)) ** (1.0 / (self.eta_m + 1.0))
+                mutant[base + 2] += delta
+
+        # 合法性修正：t/f 取整截断，p 按动态预算截断
+        for k in range(self.n):
+            mutant[3 * k] = float(np.clip(round(mutant[3 * k]), 0, seq_len - 1))
+            mutant[3 * k + 1] = float(np.clip(round(mutant[3 * k + 1]), 0, num_features - 1))
+            f_idx = int(mutant[3 * k + 1])
+            budget = self.epsilon * ranges[f_idx]
+            mutant[3 * k + 2] = np.clip(mutant[3 * k + 2], -budget, budget)
+
+        return mutant
 
     def attack(self, X, y, seed=None):
         """
-        对单个样本执行 nVITA 攻击
-        X: (1, seq_len, features)
-        y: 真实标签
+        对单个样本执行 NSGA-II 双目标攻击
+
+        返回值:
+            X_adv: 攻击效果最优的对抗样本（RSE 最大）
+            best_mse: 对应的攻击后 MSE
+            pareto_solutions: 最终第一 Pareto 前沿解集
+            pareto_objectives: 最终前沿对应的目标值矩阵，shape=(k, 2)
+            generation_pareto: 每一代第一 Pareto 前沿记录列表
         """
         if seed is not None:
             np.random.seed(seed)
@@ -1431,111 +1657,165 @@ class NVITA:
 
         # 没有允许扰动的特征，直接返回原始输入
         if len(allowed_features) == 0:
-            return X, 0.0
+            empty_pareto = np.array([]).reshape(0, 2)
+            return X, 0.0, np.array([]), empty_pareto, []
 
-        # 初始化种群
-        population = []
-        for _ in range(self.pop_size):
-            population.append(self._init_individual(seq_len, num_features, allowed_features, ranges))
-        population = np.array(population)
+        # ========== 1. 种群初始化 ==========
+        population = np.array([
+            self._init_individual(seq_len, num_features, allowed_features, ranges)
+            for _ in range(self.pop_size)
+        ])
 
-        # 计算初始适应度
-        fitness = np.zeros(self.pop_size)
+        # ========== 2. 初始种群评估双目标 ==========
+        objectives = np.zeros((self.pop_size, 2))
         for i in range(self.pop_size):
-            x_adv = self._apply_perturbation(x_np, population[i])
-            with torch.no_grad():
-                pred = self.model(torch.FloatTensor(x_adv).to(device)).item()
-            # 非目标攻击: 使用 MSE 作为适应度（与原论文一致）
-            fitness[i] = (pred - y_val) ** 2
+            objectives[i] = self._evaluate_objectives(x_np, y_val, population[i], device)
 
-        best_idx = np.argmax(fitness)
-        best_ind = population[best_idx].copy()
-        best_fit = fitness[best_idx]
+        # ========== 3. 每代 Pareto 前沿记录 ==========
+        generation_pareto = []
 
-        # DE 主循环
+        # ========== 4. NSGA-II 主循环 ==========
         for gen in range(self.maxiter):
+            # 非支配排序
+            fronts, rank = self._fast_non_dominated_sort(objectives)
+
+            # 记录当前代的第一 Pareto 前沿
+            if len(fronts) > 0:
+                gen_front = objectives[fronts[0]].copy()
+                generation_pareto.append(gen_front)
+
+            # 拥挤距离
+            crowding = self._crowding_distance(objectives, fronts)
+
+            # 二元锦标赛选择
+            mating_pool = self._tournament_selection(
+                population, objectives, rank, crowding, self.pop_size
+            )
+
+            # 生成子代：USX 集合交叉 + 分维度变异
+            offspring = []
+            for i in range(0, self.pop_size, 2):
+                p1 = mating_pool[i]
+                p2 = mating_pool[min(i + 1, self.pop_size - 1)]
+                c1, c2 = self._usx_crossover(p1, p2, seq_len, num_features, ranges)
+                c1 = self._polynomial_mutation(c1, seq_len, num_features, ranges, allowed_features)
+                c2 = self._polynomial_mutation(c2, seq_len, num_features, ranges, allowed_features)
+                offspring.append(c1)
+                offspring.append(c2)
+            offspring = np.array(offspring[:self.pop_size])
+
+            # 评估子代双目标
+            offspring_obj = np.zeros((self.pop_size, 2))
             for i in range(self.pop_size):
-                # 1. 变异 DE/rand/1
-                candidates = [j for j in range(self.pop_size) if j != i]
-                a, b, c = np.random.choice(candidates, 3, replace=False)
-                mutant = population[a] + self.F * (population[b] - population[c])
+                offspring_obj[i] = self._evaluate_objectives(
+                    x_np, y_val, offspring[i], device
+                )
 
-                # 边界处理
-                for k in range(self.n):
-                    # 时间步取整截断
-                    mutant[3 * k] = np.clip(round(mutant[3 * k]), 0, seq_len - 1)
-                    # 特征索引取整截断
-                    mutant[3 * k + 1] = np.clip(round(mutant[3 * k + 1]), 0, num_features - 1)
-                    f_idx = int(mutant[3 * k + 1])
-                    # 扰动值截断到预算内
-                    budget = self.epsilon * ranges[f_idx]
-                    mutant[3 * k + 2] = np.clip(mutant[3 * k + 2], -budget, budget)
+            # μ+λ 环境选择：合并父代和子代
+            combined_pop = np.vstack([population, offspring])
+            combined_obj = np.vstack([objectives, offspring_obj])
 
-                # 2. 二项式交叉
-                trial = population[i].copy()
-                j_rand = np.random.randint(0, 3 * self.n)
-                for j in range(3 * self.n):
-                    if np.random.random() < self.CR or j == j_rand:
-                        trial[j] = mutant[j]
+            # 对合并后的种群做非支配排序 + 拥挤距离
+            fronts_combined, rank_combined = self._fast_non_dominated_sort(combined_obj)
+            crowding_combined = self._crowding_distance(combined_obj, fronts_combined)
 
-                # 去重校验: 确保 n 个扰动点位置唯一
-                seen_positions = set()
-                for k in range(self.n):
-                    t_val = int(np.clip(round(trial[3 * k]), 0, seq_len - 1))
-                    f_val = int(np.clip(round(trial[3 * k + 1]), 0, num_features - 1))
-                    trial[3 * k] = float(t_val)
-                    trial[3 * k + 1] = float(f_val)
-                    pos_key = (t_val, f_val)
-                    retry = 0
-                    while pos_key in seen_positions and retry < 20:
-                        t_val = np.random.randint(0, seq_len)
-                        f_val = int(np.random.choice(allowed_features))
-                        trial[3 * k] = float(t_val)
-                        trial[3 * k + 1] = float(f_val)
-                        pos_key = (t_val, f_val)
-                        retry += 1
-                    seen_positions.add(pos_key)
+            # 按「非支配层级升序 → 同层拥挤距离降序」选择前 pop_size 个
+            selected_indices = []
+            for front in fronts_combined:
+                if len(selected_indices) + len(front) <= self.pop_size:
+                    selected_indices.extend(front)
+                else:
+                    front_crowding = crowding_combined[front]
+                    front_arr = np.array(front)
+                    sorted_front = front_arr[np.argsort(-front_crowding)]
+                    remaining = self.pop_size - len(selected_indices)
+                    selected_indices.extend(sorted_front[:remaining].tolist())
+                    break
 
-                # 3. 贪婪选择
-                x_adv_trial = self._apply_perturbation(x_np, trial)
-                with torch.no_grad():
-                    pred_trial = self.model(torch.FloatTensor(x_adv_trial).to(device)).item()
-                fit_trial = (pred_trial - y_val) ** 2
+            population = combined_pop[selected_indices]
+            objectives = combined_obj[selected_indices]
 
-                if fit_trial > fitness[i]:
-                    population[i] = trial
-                    fitness[i] = fit_trial
-                    if fit_trial > best_fit:
-                        best_fit = fit_trial
-                        best_ind = trial.copy()
+        # 记录最后一代的第一 Pareto 前沿
+        final_fronts, _ = self._fast_non_dominated_sort(objectives)
+        if len(final_fronts) > 0:
+            generation_pareto.append(objectives[final_fronts[0]].copy())
 
+        # ========== 5. 选择攻击效果最优的解（取 RSE 最大端点作为攻击强度上界）==========
+        # 注意：当前选的是 Pareto 前沿上 RSE 最大（即 1/RSE 最小）的端点，完全忽略 L2 隐蔽性。
+        # 这代表"攻击强度上界"而非"强度-隐蔽性折中"。论文中需明确说明此选择策略，
+        # 或改为膝点选择（knee point）以体现折中叙事。
+        best_idx = np.argmin(objectives[:, 1])
+        best_ind = population[best_idx].copy()
         x_adv_final = self._apply_perturbation(x_np, best_ind)
-        return torch.FloatTensor(x_adv_final).to(device), best_fit
+        with torch.no_grad():
+            pred_best = self.model(torch.FloatTensor(x_adv_final).to(device)).item()
+        best_mse = (pred_best - y_val) ** 2
+
+        # 最终第一 Pareto 前沿
+        if len(final_fronts) > 0:
+            pareto_solutions = population[final_fronts[0]].copy()
+            pareto_objectives = objectives[final_fronts[0]].copy()
+        else:
+            pareto_solutions = np.array([])
+            pareto_objectives = np.array([]).reshape(0, 2)
+
+        return (
+            torch.FloatTensor(x_adv_final).to(device),
+            float(best_mse),
+            pareto_solutions,
+            pareto_objectives,
+            generation_pareto,
+        )
 
 
 # =============================================================================
-# SECTION 8: LBA ATTACK EXECUTION (修正版)
+# SECTION 8: NSGA-II 批量攻击与 Pareto 进化可视化
 # =============================================================================
 
-def run_nvita_attack(model, X_test, Y_test, beta, n, maxiter, tol, device,
-                     feature_ranges, feature_constraint=None, perturb_features=None, print_info=False,
-                     pop_size=15):
+
+def extract_first_front_2d(objs):
+    """提取二维最小化问题 (obj0, obj1) 的第一 Pareto 前沿（O(N log N) 排序扫描法）
+    汇总数千个样本的最终前沿时，纯 Python 双循环的 _fast_non_dominated_sort
+    复杂度过高；二维情形可用「按 obj0 升序扫描 + 保留 obj1 严格递减」精确求解
     """
-    批量运行 nVITA 攻击，生成对抗样本
-    beta: nVITA 扰动预算系数（原论文 β）
-    pop_size: DE 种群大小，默认对齐官方 15，可通过 LBA_CONFIG['pop_size'] 调整
+    if objs.shape[0] == 0:
+        return np.empty((0, 2))
+    order = np.lexsort((objs[:, 1], objs[:, 0]))
+    front_idx = []
+    best_obj1 = np.inf
+    for idx in order:
+        if objs[idx, 1] < best_obj1:
+            front_idx.append(idx)
+            best_obj1 = objs[idx, 1]
+    return objs[np.array(front_idx, dtype=int)]
+
+
+def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n, maxiter, pop_size, device,
+                                feature_ranges, feature_constraint=None, perturb_features=None,
+                                print_info=False):
+    """
+    批量运行 NSGA-II 双目标攻击
+
+    对每个测试样本运行 NVITA_NSGA2 攻击，收集对抗样本、攻击指标和 Pareto 进化数据。
+
+    返回:
+        X_adv_total: 所有对抗样本拼接结果
+        metrics: 汇总指标字典
+        all_generation_pareto: 每个样本的 Pareto 进化记录列表
     """
     model.to(device)
     model.eval()
 
     X_adv_total = torch.empty(0).to(device)
-    Y_adv_total = torch.empty(0).to(device)
-    Y_pred_total = torch.empty(0).to(device)
+    all_clean_mse = []
+    all_adv_mse = []
+    all_l2_norms = []
+    all_generation_pareto = []
 
-    nvita = NVITA(
+    attacker = NVITA_NSGA2(
         n=n, epsilon=beta, model=model,
         feature_ranges=feature_ranges,
-        maxiter=maxiter, pop_size=pop_size, targeted=False,
+        maxiter=maxiter, pop_size=pop_size,
         feature_constraint=feature_constraint,
         perturb_features=perturb_features
     )
@@ -1545,20 +1825,155 @@ def run_nvita_attack(model, X_test, Y_test, beta, n, maxiter, tol, device,
         X_current = X_test[test_ind].unsqueeze(0).to(device)
         y_current = Y_test[test_ind].unsqueeze(0).to(device)
 
-        X_adv, _ = nvita.attack(X_current, y_current, seed=test_ind)
-
-        with torch.no_grad():
-            original_pred = model(X_current).item()
-            adv_pred = model(X_adv).item()
+        X_adv, best_mse, pareto_solutions, pareto_objectives, generation_pareto = \
+            attacker.attack(X_current, y_current, seed=test_ind)
 
         X_adv_total = torch.cat((X_adv_total, X_adv), dim=0)
-        Y_adv_total = torch.cat((Y_adv_total, torch.tensor([[adv_pred]]).to(device)), dim=0)
-        Y_pred_total = torch.cat((Y_pred_total, torch.tensor([[original_pred]]).to(device)), dim=0)
+
+        # 计算干净预测 MSE
+        with torch.no_grad():
+            pred_clean = model(X_current).item()
+        y_val = y_current.item()
+        clean_mse = (pred_clean - y_val) ** 2
+
+        all_clean_mse.append(clean_mse)
+        all_adv_mse.append(best_mse)
+
+        # 平均扰动 L2 范数（取 Pareto 前沿上所有解的平均值）
+        if len(pareto_objectives) > 0:
+            avg_l2 = np.mean(pareto_objectives[:, 0])
+        else:
+            avg_l2 = 0.0
+        all_l2_norms.append(avg_l2)
+
+        # 保存 Pareto 进化数据
+        all_generation_pareto.append({
+            'sample_idx': test_ind,
+            'generation_pareto': generation_pareto,
+            'final_pareto_obj': pareto_objectives,
+        })
 
         if print_info and (test_ind + 1) % 20 == 0:
-            print(f"  nVITA progress: {test_ind + 1}/{total}")
+            print(f"  NSGA2 progress: {test_ind + 1}/{total}")
 
-    return X_adv_total, Y_adv_total, Y_pred_total
+    metrics = {
+        'mean_clean_mse': float(np.mean(all_clean_mse)),
+        'mean_adv_mse': float(np.mean(all_adv_mse)),
+        'mean_l2_norm': float(np.mean(all_l2_norms)),
+        'clean_mses': all_clean_mse,
+        'adv_mses': all_adv_mse,
+        'l2_norms': all_l2_norms,
+        'total_samples': total,
+    }
+
+    # 汇总所有样本的最终前沿，计算全局最终 Pareto 前沿（跨样本非支配筛选）
+    final_objs_list = [
+        rec['final_pareto_obj'] for rec in all_generation_pareto
+        if isinstance(rec['final_pareto_obj'], np.ndarray) and rec['final_pareto_obj'].shape[0] > 0
+    ]
+    if final_objs_list:
+        combined_objs = np.vstack(final_objs_list)
+        metrics['global_final_pareto_obj'] = extract_first_front_2d(combined_objs)
+    else:
+        metrics['global_final_pareto_obj'] = np.empty((0, 2))
+
+    return X_adv_total, metrics, all_generation_pareto
+
+
+def plot_pareto_evolution(generation_pareto, n_max, pop_size, save_path=None):
+    """
+    绘制 Pareto 前沿进化路线散点图
+    横轴：扰动 L2 范数（越小越左，扰动越隐蔽）
+    纵轴：RSE（相对平方误差，越大攻击效果越强）
+    不同代数使用颜色渐变区分（从浅蓝到深红，代数越晚颜色越深）
+    """
+    n_generations = len(generation_pareto)
+    if n_generations == 0:
+        print("警告: 无 Pareto 进化数据可绘图")
+        return
+
+    plt.figure(figsize=(10, 8))
+
+    # 颜色映射：从浅蓝到深红
+    colors = plt.cm.RdYlBu_r(np.linspace(0.2, 0.9, n_generations))
+
+    for gen_idx, front_data in enumerate(generation_pareto):
+        if front_data.shape[0] == 0:
+            continue
+        l2_vals = front_data[:, 0]  # L2 范数
+        inv_rse_vals = front_data[:, 1]  # 1/RSE（已经是倒数形式）
+        plt.scatter(l2_vals, inv_rse_vals, c=[colors[gen_idx]], s=20,
+                    alpha=0.7)
+
+    # 生成图例（选取部分代数显示，避免图例过长）
+    step = max(1, n_generations // 6)
+    for gen_idx in range(0, n_generations, step):
+        plt.scatter([], [], c=[colors[gen_idx]], s=40, alpha=0.8,
+                    label=f'Gen {gen_idx}')
+    if n_generations - 1 not in range(0, n_generations, step):
+        plt.scatter([], [], c=[colors[n_generations - 1]], s=40, alpha=0.8,
+                    label=f'Gen {n_generations - 1}')
+
+    plt.xlabel('Perturbation L2 Norm', fontsize=13)
+    plt.ylabel('1/RSE (Inverse RSE)', fontsize=13)
+    plt.title(f'Pareto Front Evolution (n_max={n_max}, pop_size={pop_size})',
+              fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.legend(title='Generation', loc='best', fontsize=9)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  Pareto 进化图已保存至: {save_path}")
+    plt.show()
+
+
+def plot_pareto_front_with_lba(final_pareto_obj, lba_points, save_path=None,
+                               title='Final Pareto Front & LBA Learned Attack Mode'):
+    """
+    在最终全局 Pareto 前沿上标注 LBA 学到的攻击模式坐标与性能
+    final_pareto_obj: (k,2) 教师攻击(NSGA-II nVITA)全局最终前沿 [l2, 1/rse]
+    lba_points: [{'delta','l2','rse',...}, ...] 各 delta 下 LBA 攻击的坐标与性能
+    """
+    plt.figure(figsize=(11, 8))
+
+    has_front = isinstance(final_pareto_obj, np.ndarray) and final_pareto_obj.shape[0] > 0
+    if has_front:
+        l2_vals = final_pareto_obj[:, 0]
+        inv_rse_vals = final_pareto_obj[:, 1]  # 已经是 1/RSE
+        order = np.argsort(l2_vals)
+        plt.plot(l2_vals[order], inv_rse_vals[order], c='tab:blue', lw=1.0, alpha=0.45, zorder=1)
+        plt.scatter(l2_vals, inv_rse_vals, c='tab:blue', s=42, alpha=0.75, zorder=2,
+                    label='NSGA-II nVITA final Pareto front')
+
+    if lba_points:
+        lba_l2 = [p['l2'] for p in lba_points]
+        lba_inv_rse = [1.0 / p['rse'] for p in lba_points]  # 原始 RSE 转 1/RSE
+        plt.scatter(lba_l2, lba_inv_rse, c='red', marker='*', s=260,
+                    edgecolors='darkred', linewidths=0.8, zorder=3,
+                    label='LBA learned attack mode')
+        for p in lba_points:
+            inv_rse = 1.0 / p['rse']
+            plt.annotate(
+                f"δ={p['delta']:.2f}\nL2={p['l2']:.4f}\n1/RSE={inv_rse:.3f}",
+                (p['l2'], inv_rse), textcoords='offset points', xytext=(10, 8),
+                fontsize=8,
+                bbox=dict(boxstyle='round,pad=0.25', fc='mistyrose', ec='lightcoral', alpha=0.8)
+            )
+
+    plt.xlabel('Perturbation L2 Norm', fontsize=13)
+    plt.ylabel('1/RSE (Inverse RSE)', fontsize=13)
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='best', fontsize=10)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  Pareto 前沿+LBA 攻击模式图已保存至: {save_path}")
+    plt.show()
 
 
 def run_lba_attack(model, lba_model, X_test, Y_test, delta, n, device,
@@ -1684,9 +2099,9 @@ def evaluate_attack(model, X_test, Y_test, X_adv, min_speed, max_speed, attack_n
     rmse_adv = np.sqrt(mean_squared_error(Y_test_denorm, Y_pred_adv_denorm))
     mape_adv = np.mean(np.abs((Y_test_denorm - Y_pred_adv_denorm) / Y_test_denorm)) * 100
 
-    sd = np.sqrt(np.mean((Y_test_denorm - np.mean(Y_test_denorm)) ** 2))
-    rse_clean = rmse_clean / sd if sd > 0 else 0
-    rse_adv = rmse_adv / sd if sd > 0 else 0
+    # RSE = rmse_adv / rmse_clean（和 nVITA 原论文一致，统一口径）
+    rse_clean = 1.0  # 干净预测的 RSE 恒为 1（rmse_clean / rmse_clean）
+    rse_adv = rmse_adv / rmse_clean if rmse_clean > 0 else 0
 
     drop_rmse = (rmse_adv - rmse_clean) / rmse_clean * 100
 
@@ -1711,15 +2126,15 @@ def evaluate_attack(model, X_test, Y_test, X_adv, min_speed, max_speed, attack_n
 # =============================================================================
 
 def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
-                     beta=0.1, n=1, maxiter=60, tol=0.01, pop_size=15,
+                     beta=0.1, n=1, maxiter=60, pop_size=15,
                      adv_cnt=100, lba_epochs=50, lba_lr=0.005, lba_batch_size=25,
                      delta_list=None, use_bayesian=False,
                      feature_constraint=None, perturb_features=None, print_info=True, dir_weight=1.0):
     """
     完整 LBA 攻击管线（攻击目标为传入的 MoACB 模型）
     1. 拆分测试集为 LBA 训练子集 和 评估子集，严格隔离避免效果虚高
-    2. 在训练子集上跑 nVITA 生成对抗样本，训练 LBA 模型
-    3. 在评估子集上同时测试 nVITA 基线 和 LBA 攻击，保证对比公平
+    2. 在训练子集上跑 NSGA-II nVITA 生成对抗样本，训练 LBA 模型
+    3. 在评估子集上同时测试 NSGA-II nVITA 基线 和 LBA 攻击，保证对比公平
 
     beta: nVITA 扰动预算系数（原论文 β）
     delta_list: LBA 攻击缩放系数列表（原论文 δ）
@@ -1773,15 +2188,15 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
     print(f"  LBA 训练子集: {len(train_idx)} 个样本 (索引 0~{adv_cnt - 1})")
     print(f"  攻击评估子集: {len(eval_idx)} 个样本 (索引 {adv_cnt}~{total_num - 1})")
 
-    # Step 1: 在训练子集上跑 nVITA，生成 LBA 训练数据
-    print(f"\n[Step 1/4] nVITA 在 LBA 训练子集上生成对抗样本 (beta={beta}, n={n})...")
-    X_adv_train, _, _ = run_nvita_attack(
-        model, X_lba_train, Y_lba_train, beta, n, maxiter, tol, device,
+    # Step 1: 在训练子集上跑 NSGA-II nVITA，生成 LBA 训练数据
+    print(f"\n[Step 1/4] NSGA-II nVITA 在 LBA 训练子集上生成对抗样本 (beta={beta}, n={n})...")
+    X_adv_train, _, train_all_generation_pareto = run_nsga2_standalone_attack(
+        model, X_lba_train, Y_lba_train,
+        beta=beta, n=n, maxiter=maxiter, pop_size=pop_size, device=device,
         feature_ranges=feature_ranges,
         feature_constraint=feature_constraint,
         perturb_features=perturb_features,
-        print_info=print_info,
-        pop_size=pop_size
+        print_info=print_info
     )
 
     # Step 2: 构建 LBA 训练数据集（逐样本提取敏感点位置与扰动值）
@@ -1815,19 +2230,19 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
     # Step 4: 在评估子集上同时测试 nVITA 基线 和 LBA 攻击
     print(f"\n[Step 4/4] 在评估子集上对比攻击性能...")
 
-    # nVITA 基线攻击（在评估子集上）
-    print(f"\n  --- nVITA Baseline (beta={beta}) on eval set ---")
-    X_adv_nvita_eval, _, _ = run_nvita_attack(
-        model, X_eval_att, Y_eval_att, beta, n, maxiter, tol, device,
+    # NSGA-II nVITA 基线攻击（在评估子集上）
+    print(f"\n  --- NSGA-II nVITA Baseline (beta={beta}) on eval set ---")
+    X_adv_nvita_eval, nvita_metrics, nvita_all_generation_pareto = run_nsga2_standalone_attack(
+        model, X_eval_att, Y_eval_att,
+        beta=beta, n=n, maxiter=maxiter, pop_size=pop_size, device=device,
         feature_ranges=feature_ranges,
         feature_constraint=feature_constraint,
         perturb_features=perturb_features,
-        print_info=print_info,
-        pop_size=pop_size
+        print_info=print_info
     )
     nvita_results = evaluate_attack(
         model, X_eval_att, Y_eval_att, X_adv_nvita_eval,
-        min_speed, max_speed, "nVITA (Baseline)", device
+        min_speed, max_speed, "NSGA-II nVITA (Baseline)", device
     )
     results['nVITA'] = nvita_results
 
@@ -1856,6 +2271,7 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
         viz_data['y_nvita'] = model(X_adv_nvita_eval).cpu().numpy().flatten()
 
     # LBA 攻击（在评估子集上）+ 拟合质量指标
+    lba_pareto_points = []  # 各 delta 下 LBA 攻击在 Pareto 坐标系中的坐标与性能
     for delta in delta_list:
         print(f"\n  --- LBA Attack (delta={delta}) on eval set ---")
         X_adv_lba_eval, _, _ = run_lba_attack(
@@ -1882,6 +2298,27 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
         print(f"  [LBA 拟合指标] 敏感点准确率 AR: {ar:.4f}, 扰动值 RMSE: {perturb_rmse:.6f}")
 
         results[f'LBA_delta_{delta}'] = lba_results
+
+        # 记录 LBA 学到的攻击模式在 Pareto 坐标系中的位置与性能
+        # L2 口径与 nVITA 一致：均只有 n 个稀疏点被扰动，||X_adv-X||_2 即扰动值向量 L2
+        perturb_l2 = torch.sqrt(((X_adv_lba_eval - X_eval_att) ** 2).sum(dim=(1, 2))).mean().item()
+        clean_rmse = lba_results['rmse_clean']
+        lba_rse = lba_results['rmse_adv'] / clean_rmse if clean_rmse > 0 else 0.0
+        lba_pareto_points.append({
+            'delta': delta, 'l2': perturb_l2, 'rse': lba_rse,
+            'rmse_adv': lba_results['rmse_adv'],
+            'drop_rmse_pct': lba_results['drop_rmse_pct'],
+            'sensitive_ar': ar,
+        })
+
+    # 打印 LBA 学到的攻击模式坐标（与教师攻击 Pareto 前沿同一坐标系）
+    print("\n" + "=" * 60)
+    print("LBA 学到的攻击模式 (Pareto 前沿坐标系: 扰动 L2 / RSE)")
+    print("=" * 60)
+    print(f"{'delta':>8} {'Perturb_L2':>12} {'RSE':>10} {'RMSE_adv':>10} {'Drop%':>10} {'AR':>8}")
+    for pt in lba_pareto_points:
+        print(f"{pt['delta']:>8.2f} {pt['l2']:>12.6f} {pt['rse']:>10.4f} "
+              f"{pt['rmse_adv']:>10.4f} {pt['drop_rmse_pct']:>10.2f} {pt['sensitive_ar']:>8.4f}")
 
     # 总结对比
     print("\n" + "=" * 60)
@@ -1910,7 +2347,13 @@ def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
         print(f"\n警告: 生成对抗攻击可视化图表时出错: {e}")
         traceback.print_exc()
 
-    return results, lba_model, X_adv_nvita_eval
+    pareto_artifacts = {
+        'train_generation_pareto': train_all_generation_pareto,
+        'baseline_eval_generation_pareto': nvita_all_generation_pareto,
+        'baseline_eval_metrics': nvita_metrics,
+        'lba_points': lba_pareto_points,
+    }
+    return results, lba_model, X_adv_nvita_eval, pareto_artifacts
 
 
 # =============================================================================
@@ -2399,7 +2842,7 @@ def main():
     parser.add_argument('--lba_lr', type=float, default=LBA_CONFIG['lba_lr'], help='LBA learning rate')
     parser.add_argument('--adv_cnt', type=int, default=LBA_CONFIG['adv_cnt'], help='Adv examples for LBA training')
     parser.add_argument('--pop_size', type=int, default=LBA_CONFIG['pop_size'],
-                        help='DE population size for nVITA (官方默认 15，增大可提升搜索覆盖度但耐时增加)')
+                        help='NSGA-II population size for nVITA (官方 DE 版默认 15，增大可提升搜索覆盖度但耗时增加)')
     parser.add_argument('--dir_weight', type=float, default=LBA_CONFIG['dir_weight'],
                         help='Direction-consistency penalty weight for LBA regression loss (0 = disable)')
     parser.add_argument('--delta_list', type=float, nargs='+', default=LBA_CONFIG['delta_list'],
@@ -2416,6 +2859,14 @@ def main():
                         help='Path to load a pre-trained model checkpoint (skip NSGA-II search and training)')
     parser.add_argument('--encoding_config', type=str, default=None,
                         help='自定义编码配置文件(JSON)，包含 topo/cnn_params/lstm_params/setting；不指定则使用论文固定编码')
+    parser.add_argument('--disable_lba', action='store_true', default=False,
+                        help='Force disable LBA pipeline, run NSGA-II nVITA attack instead')
+    parser.add_argument('--enable_lba', action='store_true', default=False,
+                        help="Force enable LBA pipeline (overrides LBA_CONFIG['enable_lba']=False)")
+    parser.add_argument('--n_max', type=int, default=LBA_CONFIG['n'],
+                        help='Number of perturbations per sample (used by NSGA-II attack)')
+    parser.add_argument('--maxiter', type=int, default=LBA_CONFIG['maxiter'],
+                        help='Maximum generations for NSGA-II attack')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     args = parser.parse_args()
 
@@ -2453,6 +2904,23 @@ def main():
         return features  # 空列表表示不允许扰动任何特征
     
     args.perturb_features = mask_to_features(args.perturb_mask)
+
+    # ====== LBA 总开关解析 ======
+    # 优先级：命令行显式参数 > LBA_CONFIG['enable_lba'] 配置
+    # --enable_lba：强制启用 LBA（可覆盖配置中的 False）
+    # --disable_lba：强制封存 LBA，仅运行 nVITA/NSGA-II 攻击
+    if args.enable_lba and args.disable_lba:
+        raise ValueError("--enable_lba 与 --disable_lba 不能同时指定，请二选一")
+    if args.enable_lba:
+        lba_disabled = False
+        print(f"\n>>> LBA 开关状态: 启用（--enable_lba 命令行强制覆盖）")
+    elif args.disable_lba:
+        lba_disabled = True
+        print(f"\n>>> LBA 开关状态: 封存（--disable_lba 命令行强制覆盖）")
+    else:
+        lba_disabled = not LBA_CONFIG['enable_lba']
+        state_str = '启用' if LBA_CONFIG['enable_lba'] else '封存'
+        print(f"\n>>> LBA 开关状态: {state_str}（来自 LBA_CONFIG['enable_lba'] 配置）")
 
     # Set seed
     random.seed(args.seed)
@@ -2755,35 +3223,151 @@ def main():
             # 固定编码模式不存在 Pareto 前沿，无需保存每代 CSV
         # ====== 新增: if/else 块结束 ======
 
-        # ==================== LBA Attack Phase ====================
+        # ==================== Attack Phase ====================
+        # 当 lba_disabled=True 时：运行 NSGA-II 双目标攻击（跳过 LBA 管线）
+        # 当 lba_disabled=False 且 no_attack=False 时：运行原始 LBA 管线
         if not args.no_attack:
-            print(f"\n{'=' * 80}")
-            print(f"开始 LBA 对抗攻击评估 (第 {run_id + 1} 次运行)")
-            print(f"{'=' * 80}")
+            if lba_disabled:
+                print(f"\n{'=' * 80}")
+                print(f"开始 NSGA-II 双目标攻击评估 (第 {run_id + 1} 次运行)")
+                print(f"{'=' * 80}")
 
-            lba_results, lba_model, X_adv_nvita = run_lba_pipeline(
-                model, X_lba_pool, Y_lba_pool, min_speed, max_speed, DEVICE,
-                beta=args.beta, n=args.n_perturb,
-                maxiter=LBA_CONFIG['maxiter'], tol=LBA_CONFIG['tol'],
-                pop_size=args.pop_size,
-                adv_cnt=adv_cnt_auto, lba_epochs=args.lba_epochs,
-                lba_lr=args.lba_lr, lba_batch_size=LBA_CONFIG['lba_batch_size'],
-                delta_list=args.delta_list, use_bayesian=args.use_bayesian,
-                feature_constraint=args.feat_constraint,
-                perturb_features=args.perturb_features,
-                print_info=True,
-                dir_weight=args.dir_weight
-            )
+                # 评估数据池 = 验证集 + 测试集的后半部分
+                feature_ranges = np.ones(num_features)
+                eval_start = adv_cnt_auto
+                X_eval = X_lba_pool[eval_start:]
+                Y_eval = Y_lba_pool[eval_start:]
 
-            # Save LBA results
-            with open(f'{prefix}lba_attack_results.pkl', 'wb') as f:
-                pickle.dump({
-                    'lba_results': lba_results,
-                    'config': LBA_CONFIG,
-                    'feat_constraint': args.feat_constraint,
-                    'run_id': run_id + 1,
-                }, f)
-            print(f"\nLBA 攻击结果已保存至: {prefix}lba_attack_results.pkl")
+                print(f"\nNSGA-II 攻击配置: n_max={args.n_max}, pop_size={args.pop_size}, maxiter={args.maxiter}, beta={args.beta}")
+                print(f"评估样本数: {X_eval.shape[0]}")
+
+                X_adv_nsga2, metrics, all_generation_pareto = run_nsga2_standalone_attack(
+                    model, X_eval, Y_eval, beta=args.beta, n=args.n_max,
+                    maxiter=args.maxiter, pop_size=args.pop_size,
+                    device=DEVICE, feature_ranges=feature_ranges,
+                    feature_constraint=args.feat_constraint,
+                    perturb_features=args.perturb_features,
+                    print_info=True
+                )
+
+                # 评估攻击效果
+                attack_results = evaluate_attack(
+                    model, X_eval, Y_eval, X_adv_nsga2,
+                    min_speed, max_speed, f"NSGA2 (n_max={args.n_max})", DEVICE
+                )
+
+                # 计算 RSE 和平均扰动 L2
+                clean_rmse = attack_results['rmse_clean']
+                adv_rmse = attack_results['rmse_adv']
+                rse = adv_rmse / clean_rmse if clean_rmse > 0 else 0
+
+                print(f"\n{'=' * 50}")
+                print(f"NSGA-II 双目标攻击汇总")
+                print(f"{'=' * 50}")
+                print(f"干净预测 RMSE: {clean_rmse:.4f} m/s")
+                print(f"攻击后 RMSE:   {adv_rmse:.4f} m/s")
+                print(f"RSE:            {rse:.4f}")
+                print(f"平均扰动 L2:   {metrics['mean_l2_norm']:.6f}")
+                n_pareto = int(metrics['global_final_pareto_obj'].shape[0]) \
+                    if isinstance(metrics.get('global_final_pareto_obj'), np.ndarray) else 0
+                print(f"全局最终 Pareto 前沿解数量 (跨样本非支配筛选): {n_pareto}")
+                print(f"{'=' * 50}")
+
+                # 保存 Pareto 进化图片和数据
+                os.makedirs(f'{OUTPUT_DIR}/run{run_id + 1}', exist_ok=True)
+                pareto_save_dir = f'{OUTPUT_DIR}/run{run_id + 1}'
+
+                if len(all_generation_pareto) > 0:
+                    last_sample_pareto = all_generation_pareto[-1]['generation_pareto']
+                    if len(last_sample_pareto) > 0:
+                        plot_pareto_evolution(
+                            last_sample_pareto,
+                            n_max=args.n_max,
+                            pop_size=args.pop_size,
+                            save_path=f'{pareto_save_dir}/pareto_evolution.png'
+                        )
+                    # 保存所有样本的 Pareto 数据
+                    with open(f'{pareto_save_dir}/pareto_evolution_data.pkl', 'wb') as f:
+                        pickle.dump(all_generation_pareto, f)
+                    print(f"Pareto 进化数据已保存至: {pareto_save_dir}/pareto_evolution_data.pkl")
+
+                # 保存攻击结果
+                with open(f'{prefix}nsga2_attack_results.pkl', 'wb') as f:
+                    pickle.dump({
+                        'attack_results': attack_results,
+                        'metrics': metrics,
+                        'generation_pareto': all_generation_pareto,
+                        'config': {
+                            'n_max': args.n_max,
+                            'pop_size': args.pop_size,
+                            'maxiter': args.maxiter,
+                            'beta': args.beta,
+                            'feature_constraint': args.feat_constraint,
+                            'perturb_features': args.perturb_features,
+                        },
+                        'run_id': run_id + 1,
+                    }, f)
+                print(f"NSGA2 攻击结果已保存至: {prefix}nsga2_attack_results.pkl")
+            else:
+                print(f"\n{'=' * 80}")
+                print(f"开始 LBA 对抗攻击评估 (第 {run_id + 1} 次运行)")
+                print(f"{'=' * 80}")
+
+                lba_results, lba_model, X_adv_nvita, pareto_artifacts = run_lba_pipeline(
+                    model, X_lba_pool, Y_lba_pool, min_speed, max_speed, DEVICE,
+                    beta=args.beta, n=args.n_perturb,
+                    maxiter=LBA_CONFIG['maxiter'],
+                    pop_size=args.pop_size,
+                    adv_cnt=adv_cnt_auto, lba_epochs=args.lba_epochs,
+                    lba_lr=args.lba_lr, lba_batch_size=LBA_CONFIG['lba_batch_size'],
+                    delta_list=args.delta_list, use_bayesian=args.use_bayesian,
+                    feature_constraint=args.feat_constraint,
+                    perturb_features=args.perturb_features,
+                    print_info=True,
+                    dir_weight=args.dir_weight
+                )
+
+                # Save LBA results
+                with open(f'{prefix}lba_attack_results.pkl', 'wb') as f:
+                    pickle.dump({
+                        'lba_results': lba_results,
+                        'config': LBA_CONFIG,
+                        'feat_constraint': args.feat_constraint,
+                        'run_id': run_id + 1,
+                    }, f)
+                print(f"\nLBA 攻击结果已保存至: {prefix}lba_attack_results.pkl")
+
+                # ====== Pareto 前沿输出（与 NSGA-II 模式对齐：LBA 开启时同样打印）======
+                os.makedirs(f'{OUTPUT_DIR}/run{run_id + 1}', exist_ok=True)
+                pareto_save_dir = f'{OUTPUT_DIR}/run{run_id + 1}'
+
+                baseline_pareto = pareto_artifacts['baseline_eval_generation_pareto']
+                global_front = pareto_artifacts['baseline_eval_metrics'].get(
+                    'global_final_pareto_obj', np.empty((0, 2)))
+
+                # 1) Pareto 进化图（评估子集基线攻击，与 NSGA-II 模式同款）
+                if len(baseline_pareto) > 0:
+                    last_sample_pareto = baseline_pareto[-1]['generation_pareto']
+                    if len(last_sample_pareto) > 0:
+                        plot_pareto_evolution(
+                            last_sample_pareto,
+                            n_max=args.n_perturb,
+                            pop_size=args.pop_size,
+                            save_path=f'{pareto_save_dir}/pareto_evolution.png'
+                        )
+                # 2) 保存所有 Pareto 进化数据（训练子集教师攻击 + 评估子集基线攻击）
+                with open(f'{pareto_save_dir}/pareto_evolution_data.pkl', 'wb') as f:
+                    pickle.dump({
+                        'train_generation_pareto': pareto_artifacts['train_generation_pareto'],
+                        'baseline_eval_generation_pareto': baseline_pareto,
+                    }, f)
+                print(f"Pareto 进化数据已保存至: {pareto_save_dir}/pareto_evolution_data.pkl")
+                # 3) 最终全局 Pareto 前沿 + LBA 学到的攻击模式标注
+                if len(global_front) > 0:
+                    plot_pareto_front_with_lba(
+                        global_front, pareto_artifacts['lba_points'],
+                        save_path=f'{pareto_save_dir}/pareto_front_with_lba.png'
+                    )
 
         print(f"\n{'=' * 80}")
         print(f"第 {run_id + 1} 次运行全部完成！")
@@ -2792,7 +3376,15 @@ def main():
         print(f"  - 综合报告: {prefix}comprehensive_report.png")
         print(f"  - 测试集预测: {prefix}test_set_wind_speed_predictions.csv")
         if not args.no_attack:
-            print(f"  - LBA攻击结果: {prefix}lba_attack_results.pkl")
+            if lba_disabled:
+                print(f"  - NSGA2攻击结果: {prefix}nsga2_attack_results.pkl")
+                print(f"  - Pareto进化图: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution.png")
+                print(f"  - Pareto进化数据: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_data.pkl")
+            else:
+                print(f"  - LBA攻击结果: {prefix}lba_attack_results.pkl")
+                print(f"  - Pareto进化图: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution.png")
+                print(f"  - Pareto前沿+LBA攻击模式图: {OUTPUT_DIR}/run{run_id + 1}/pareto_front_with_lba.png")
+                print(f"  - Pareto进化数据: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_data.pkl")
         print(f"{'=' * 80}")
 
     print(f"\n{'#' * 80}")
