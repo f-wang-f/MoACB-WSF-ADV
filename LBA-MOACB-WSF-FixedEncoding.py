@@ -1,13 +1,34 @@
 """
-LBA-MOACB-WSF with Fixed Manual Encoding
-========================================
+MoACB-WSF with Fixed Manual Encoding (NSGA-II 变长编码双目标稀疏攻击版，L0 作为约束)
+=======================================================================
 基于论文给出的最佳折中混合编码向量直接构建 CNN-BiLSTM 风速预测模型，
-跳过 NSGA-II 进化搜索，直接训练目标模型并执行 LBA/nVITA 对抗攻击评估。
+跳过 NSGA-II 结构搜索，直接训练目标模型并执行 nVITA/NSGA-II 稀疏对抗攻击评估。
 
-说明：本文件代码结构与 LBA-MOACB-WSF.py 保持一致，仅将 NSGA-II 模型搜索替换为固定编码。
-- 编码向量：论文表 "BEST TRADE-OFF HYBRID ENCODING VECTORS OBTAINED BY THE PROPOSED MoACB-WSF"
-- nVITA：NSGA-II 双目标稀疏黑盒对抗攻击（L2 范数 + -RSE Pareto 多目标优化）
-- LBA：双分支CNN学习攻击模式，支持扰动特征数量约束
+本版本相对 LBA 版的三点核心改动：
+1.【删除 LBA】完整移除 LBA 学习式攻击管线：LBA_Dataset / BayesianConv1d / BayesianLinear /
+   SEBlock / CNN_LBA_Model 等类，get_sensitive_point_and_value / get_LBA_Dataset /
+   build_sensitive_labels / print_sign_distribution / train_lba_model / calc_sensitive_point_ar /
+   calc_perturb_rmse / evaluate_lba_fitting_quality / run_lba_attack / run_lba_pipeline 等函数，
+   全部 LBA 可视化函数与 LBA_CONFIG 全局配置，以及 main() 中的 LBA 分支与 LBA 命令行参数。
+   保留：数据加载/归一化/划分、HybridCNNBiLSTM 固定编码训练与评估、evaluate_attack、
+        run_nsga2_standalone_attack、plot_pareto_evolution。
+2.【变长编码】NVITA_NSGA2 由固定 n 组三元组改为可变长度三元组编码：
+   个体 = [t1,f1,p1, t2,f2,p2, ..., tn,fn,pn]，总长度 3n 随 n 动态变化，
+   n ∈ [n_min, n_max]，由初始化随机采样、插入变异(n+1)、删除变异(n-1)共同驱动；
+   交叉改为「变长单点交叉 + 位置去重 + 长度截断 + 长度补齐 + 预算截断」的合法性修复链。
+3.【双目标 + L0 约束】优化目标为 (L2, -RSE) 双目标，全部最小化：
+   obj1 = 扰动 L2 范数（越小越隐蔽）
+   obj2 = -RSE，RSE = sqrt(攻击后MSE / 干净预测MSE)（越小代表攻击越强，替代原 1/RSE）
+   n_actual（去重后真实扰动点数，即 L0 范数）不再作为目标维度，而是约束变量：
+   要求 n_actual ∈ [n_min, n_max]，违约度 cv = max(0, n-n_max) + max(0, n_min-n)；
+   非支配排序采用 Deb 约束支配（可行优先 → 二维目标支配 → 违约度比较）。
+   删除冗余的第三目标维度可避免第一前沿过早吞没整个种群，拥挤距离 / 锦标赛 /
+   环境选择均按 2 个目标计算。
+4.【分析扩展】攻击高级分析模块（SECTION 7.5）：二维超体积 HV 逐代收敛曲线、双目标均值/最优值
+   进化曲线（每代 n_actual 均值作为约束变量统计一并输出）、每代前沿解数量曲线、
+   全局最终前沿主 Pareto 图（L2 vs -RSE，按 n_actual 着色 + 颜色条）、
+   RSE 中位典型样本攻击前后预测对比、扰动位置 (t,f) 频次热力图；图片输出到 output/run{id}/，
+   统计数据统一持久化到 output/run{id}/analysis_data.pkl。
 
 原文件 LBA-MOACB-WSF.py 完全保留，两个文件并存。
 """
@@ -21,9 +42,9 @@ LBA-MOACB-WSF with Fixed Manual Encoding
 ## 第一次运行：训练固定编码模型并保存
 #python LBA-MOACB-WSF-FixedEncoding.py --save_model output/fixed_encoding_model.pt
 
-# 后续消融实验：加载模型，仅跑攻击评估（跳过训练）
-#python LBA-MOACB-WSF-FixedEncoding.py --load_model output/fixed_encoding_model.pt --perturb_mask "0010"
-#python LBA-MOACB-WSF-FixedEncoding.py --load_model output/fixed_encoding_model.pt --perturb_mask "1111" --feat_constraint 2
+# 后续消融实验：加载模型，仅跑 NSGA-II 变长双目标（L0 约束）攻击评估（跳过训练）
+#python LBA-MOACB-WSF-FixedEncoding.py --load_model output/fixed_encoding_model.pt --n_min 1 --n_max 6
+#python LBA-MOACB-WSF-FixedEncoding.py --load_model output/fixed_encoding_model.pt --n_min 3 --n_max 3 --pop_size 20 --maxiter 30
 
 import os
 import sys
@@ -33,7 +54,6 @@ import random
 import time
 import warnings
 import traceback
-import math
 import pickle
 import argparse
 from pathlib import Path
@@ -43,7 +63,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 import matplotlib.pyplot as plt
@@ -59,7 +78,6 @@ plt.rcParams['axes.unicode_minus'] = False
 
 OUTPUT_DIR = 'output'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(os.path.join(OUTPUT_DIR, 'LBA_models'), exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_DIR, 'attack_results'), exist_ok=True)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -68,7 +86,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 FILENAME = 'winddata.xlsx'
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
-SEQUENCE_LENGTH =10
+SEQUENCE_LENGTH =100
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -114,27 +132,20 @@ OPTIMIZER_MAP = {0: 'SGD', 1: 'Adam', 2: 'AdaDelta', 3: 'RMSprop'}
 REGULARIZER_MAP = {0: None, 1: 'L1', 2: 'L2', 3: 'L1L2'}
 BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 
-# ==================== LBA Attack Configuration ====================
+# ==================== NSGA-II 变长双目标稀疏攻击配置（L0 作为约束） ====================
 # 命名说明（对齐原论文）：
 #   beta: nVITA 的扰动预算系数（原论文中的 β）
-#   delta: LBA 生成扰动时的缩放系数（原论文中的 δ）
-LBA_CONFIG = {
-    'enable_lba': False,  # ★ LBA 学习式攻击总开关：True=启用完整 LBA 管线；False=封存 LBA（仅运行 nVITA/NSGA-II 攻击）。命令行 --enable_lba/--disable_lba 可临时覆盖此配置
-    'n': 3,  # number of perturbations per sample
-    'beta': 0.3,  # nVITA perturbation budget factor (原论文 β)
-    'maxiter': 40,  # NSGA-II max generations for nVITA baseline
-    'pop_size': 30,  # NSGA-II population size for nVITA baseline（官方 DE 版默认 15，增大可提升搜索覆盖度，但每代计算量线性增加）
-    'adv_cnt': 2516,  # number of adv examples for LBA training（前 N 个训练，后 336-N 个评估；当前 236 → 评估样本 100）
-    'lba_epochs': 50,  # LBA model training epochs
-    'lba_lr': 0.001,  # LBA model learning rate
-    'lba_batch_size': 16,  # LBA model batch size (对齐官方实现默认值)
-    'delta_list': [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0],  # LBA attack scaling factors (原论文 δ)
-    'use_bayesian': False   ,  # 启用贝叶斯卷积层，提升泛化性和不确定性估计
-    'perturb_mask': '1111',  # 二进制掩码字符串，指定要扰动的特征
-                             # 例如'0010'表示只扰动第3个特征(0-based索引2)
-                             # '1111'表示扰动所有4个特征
-    'feature_constraint': None,  # 扰动特征数量约束 (None=不限制, 整数=限定特征数)
-    'dir_weight': 0,  # 方向一致性惩罚权重：MSE 对"小幅值但符号错"惩罚不足，加这个项强制预测符号与真实值一致，0 表示关闭该惩罚；必须为非负数，负数会让模型反而主动学反方向
+# 【变长编码】n_min / n_max 取代原固定 n：每个个体独立采样扰动点数 n ∈ [n_min, n_max]
+NSGA2_CONFIG = {
+    'n_min': 1,      # 变长编码：扰动点数下界（时序稀疏攻击场景默认 1）
+    'n_max': 6,      # 变长编码：扰动点数上界（时序稀疏攻击场景默认 6）
+    'beta': 0.3,     # nVITA perturbation budget factor (原论文 β)
+    'maxiter': 20,   # NSGA-II max generations
+    'pop_size': 40,  # NSGA-II population size（增大可提升搜索覆盖度，但每代计算量线性增加）
+    'insert_prob': 0.1,  # 变长编码：插入变异概率（n+1）
+    'delete_prob': 0.1,  # 变长编码：删除变异概率（n-1）
+    'select_mode': 'knee',   # 最终解选择策略：'knee'=归一化折中膝点 / 'max_rse'=攻击强度上界端点
+    'knee_min_rse': 2.0,     # 膝点有效性下界：仅 RSE>=该值的前沿点可作膝点候选
 }
 
 # ==================== FIXED MANUAL ENCODING FROM PAPER ====================
@@ -364,6 +375,7 @@ class HybridCNNBiLSTM(nn.Module):
         final = self.global_pool(final).squeeze(-1)
         final = self.fc(final)
         return final
+
 
 
 # =============================================================================
@@ -865,486 +877,45 @@ def environmental_selection(combined_pop, combined_perf, combined_complex, combi
     return new_pop, np.array(new_perf), np.array(new_complex)
 
 
-# =============================================================================
-# SECTION 6: LBA ADVERSARIAL ATTACK MODULES (修正版)
-# =============================================================================
-
-class LBA_Dataset(Dataset):
-    """
-    LBA 训练数据集（对齐 LearningBased_Atk/attacks/LBA/LBA_dataset.py）
-    每个样本包含: 原始时序输入 data、敏感点位置标签 labels、敏感点扰动值 value
-    labels 与 value 形状均为 (1, n)，位置编码为 feature_idx * windows_cnt + window_idx
-    """
-    def __init__(self, device='cpu', data=None, labels=None, value=None):
-        self.device = device
-        self.data = torch.empty(0).to(device) if data is None else data.to(device)
-        self.labels = torch.empty(0).to(device) if labels is None else labels.to(device)
-        self.value = torch.empty(0).to(device) if value is None else value.to(device)
-
-    def add_X(self, x):
-        self.data = torch.cat((self.data, x.to(self.device)), dim=0)
-
-    def add_Y(self, y):
-        self.labels = torch.cat((self.labels, y.to(self.device)), dim=0)
-
-    def add_value(self, value):
-        self.value = torch.cat((self.value, value.to(self.device)), dim=0)
-
-    def __len__(self):
-        return self.data.shape[0]
-
-    def __getitem__(self, idx):
-        return self.data[idx], self.labels[idx], self.value[idx]
-
-
-class BayesianConv1d(nn.Module):
-    """
-    贝叶斯卷积层：使用权重不确定性建模，提升模型泛化性和不确定性估计
-    采用局部重参数化技巧 (Local Reparameterization Trick) 提高效率
-    无需外部库 blitz，完全自包含实现
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size,)
-        self.stride = stride
-        self.padding = padding
-
-        # 后验参数: 权重均值 和 log方差
-        self.weight_mu = nn.Parameter(
-            torch.empty(out_channels, in_channels, *self.kernel_size)
-        )
-        self.weight_log_sigma = nn.Parameter(
-            torch.empty(out_channels, in_channels, *self.kernel_size)
-        )
-        self.bias_mu = nn.Parameter(torch.empty(out_channels))
-        self.bias_log_sigma = nn.Parameter(torch.empty(out_channels))
-
-        # 先验: 标准正态 N(0, 1)
-        self.prior_mu = 0.0
-        self.prior_sigma = 1.0
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        # 用 Glorot 初始化均值，log_sigma 初始为较小负值
-        nn.init.kaiming_uniform_(self.weight_mu, a=math.sqrt(5))
-        nn.init.constant_(self.weight_log_sigma, -3.0)
-        nn.init.zeros_(self.bias_mu)
-        nn.init.constant_(self.bias_log_sigma, -3.0)
-
-    def forward(self, x):
-        # 局部重参数化技巧：直接采样输出，而非采样权重
-        weight_sigma = torch.exp(self.weight_log_sigma)
-        bias_sigma = torch.exp(self.bias_log_sigma)
-
-        # 输出的均值和方差
-        act_mu = F.conv1d(x, self.weight_mu, self.bias_mu,
-                         stride=self.stride, padding=self.padding)
-        act_var = F.conv1d(x ** 2, weight_sigma ** 2, bias_sigma ** 2,
-                          stride=self.stride, padding=self.padding)
-        act_std = torch.sqrt(act_var + 1e-8)
-
-        # 重参数化采样: output = mu + sigma * eps
-        eps = torch.randn_like(act_mu)
-        return act_mu + act_std * eps
-
-    def kl_divergence(self):
-        """
-        计算后验与先验之间的 KL 散度
-        KL(q(w|θ) || p(w))，其中 q 为高斯后验，p 为标准高斯先验
-        """
-        weight_sigma = torch.exp(self.weight_log_sigma)
-        bias_sigma = torch.exp(self.bias_log_sigma)
-
-        # KL for weights: log(σ_prior/σ_q) + (σ_q^2 + (μ_q - μ_prior)^2)/(2σ_prior^2) - 0.5
-        kl_w = (
-            torch.log(torch.tensor(self.prior_sigma) / weight_sigma)
-            + (weight_sigma ** 2 + (self.weight_mu - self.prior_mu) ** 2) / (2 * self.prior_sigma ** 2)
-            - 0.5
-        ).sum()
-
-        # KL for bias
-        kl_b = (
-            torch.log(torch.tensor(self.prior_sigma) / bias_sigma)
-            + (bias_sigma ** 2 + (self.bias_mu - self.prior_mu) ** 2) / (2 * self.prior_sigma ** 2)
-            - 0.5
-        ).sum()
-
-        return kl_w + kl_b
-
-
-class BayesianLinear(nn.Module):
-    """
-    贝叶斯全连接层：同样使用权重不确定性建模
-    """
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-
-        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
-        self.weight_log_sigma = nn.Parameter(torch.empty(out_features, in_features))
-        self.bias_mu = nn.Parameter(torch.empty(out_features))
-        self.bias_log_sigma = nn.Parameter(torch.empty(out_features))
-
-        self.prior_mu = 0.0
-        self.prior_sigma = 1.0
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.weight_mu, a=math.sqrt(5))
-        nn.init.constant_(self.weight_log_sigma, -3.0)
-        nn.init.zeros_(self.bias_mu)
-        nn.init.constant_(self.bias_log_sigma, -3.0)
-
-    def forward(self, x):
-        weight_sigma = torch.exp(self.weight_log_sigma)
-        bias_sigma = torch.exp(self.bias_log_sigma)
-
-        act_mu = F.linear(x, self.weight_mu, self.bias_mu)
-        act_var = F.linear(x ** 2, weight_sigma ** 2, bias_sigma ** 2)
-        act_std = torch.sqrt(act_var + 1e-8)
-
-        eps = torch.randn_like(act_mu)
-        return act_mu + act_std * eps
-
-    def kl_divergence(self):
-        weight_sigma = torch.exp(self.weight_log_sigma)
-        bias_sigma = torch.exp(self.bias_log_sigma)
-
-        kl_w = (
-            torch.log(torch.tensor(self.prior_sigma) / weight_sigma)
-            + (weight_sigma ** 2 + (self.weight_mu - self.prior_mu) ** 2) / (2 * self.prior_sigma ** 2)
-            - 0.5
-        ).sum()
-        kl_b = (
-            torch.log(torch.tensor(self.prior_sigma) / bias_sigma)
-            + (bias_sigma ** 2 + (self.bias_mu - self.prior_mu) ** 2) / (2 * self.prior_sigma ** 2)
-            - 0.5
-        ).sum()
-        return kl_w + kl_b
-
-
-class CNN_LBA_Model(nn.Module):
-    """
-    LBA 学习模型（对齐 LearningBased_Atk/attacks/LBA/LBA_model.py）
-    输入不做转置：时间步作为卷积通道，特征维作为卷积长度
-    分类头输出 features_cnt*windows_cnt + 1 类，最后一类表示"不施加扰动"
-    回归头只输出 n 个扰动值，与 Top-n 敏感点一一对应
-    use_bayesian=True 时用自实现贝叶斯卷积层替代官方的 blitz BayesianConv1d
-    """
-    def __init__(self, features_cnt, windows_cnt, n, use_bayesian=False):
-        super(CNN_LBA_Model, self).__init__()
-        self.features_cnt = features_cnt
-        self.windows_cnt = windows_cnt
-        self.n = n
-        self.total_positions = features_cnt * windows_cnt
-        self.no_attack_class = features_cnt * windows_cnt
-        self.num_classes = features_cnt * windows_cnt + 1
-        self.use_bayesian = use_bayesian
-
-        if use_bayesian:
-            self.conv1 = BayesianConv1d(windows_cnt, 16, kernel_size=3, stride=1, padding=1)
-            self.conv2 = BayesianConv1d(16, 32, kernel_size=3, stride=1, padding=1)
-        else:
-            self.conv1 = nn.Conv1d(windows_cnt, 16, kernel_size=3, stride=1, padding=1)
-            self.conv2 = nn.Conv1d(16, 32, kernel_size=3, stride=1, padding=1)
-
-        self.fc1 = nn.Linear(32 * features_cnt, 64)
-        self.bn1 = nn.BatchNorm1d(64)
-        self.fc2_classification = nn.Linear(64, self.num_classes)
-        self.fc2_attack = nn.Linear(64, n)
-
-    def forward(self, x):
-        # x shape: (batch, windows_cnt, features_cnt)，与官方一致不转置
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.view(-1, 32 * self.features_cnt)
-        x = F.relu(self.fc1(x))
-        x = self.bn1(x)
-
-        output_classification = self.fc2_classification(x)  # (batch, features*windows + 1)
-        output_attack = self.fc2_attack(x)                  # (batch, n)
-        return output_classification, output_attack
-
-    def kl_divergence(self):
-        """汇总所有贝叶斯层的 KL 散度（仅贝叶斯模式下有效，供不确定性检视用）"""
-        if not self.use_bayesian:
-            return torch.tensor(0.0)
-        kl = torch.tensor(0.0)
-        for module in self.modules():
-            if isinstance(module, (BayesianConv1d, BayesianLinear)):
-                kl = kl + module.kl_divergence()
-        return kl
-
-    def __str__(self):
-        mode = "Bayesian" if self.use_bayesian else "Deterministic"
-        return f"CNN_LBA_Model({mode})"
-
-
-def get_sensitive_point_and_value(eta, n):
-    """
-    从单样本扰动矩阵中提取敏感点位置与扰动值（对齐官方 get_sensitive_point_and_value）
-    eta: (1, windows_cnt, features_cnt)
-    位置编码: index = feature_idx * windows_cnt + window_idx
-    非零扰动多于 n 个时保留绝对值最大的 n 个；不足 n 个时用"无攻击"类 + 0 值补齐
-    返回: points (1, n) long, values (1, n) float
-    """
-    windows_cnt = eta.shape[1]
-    features_cnt = eta.shape[2]
-    no_attack_class = features_cnt * windows_cnt
-
-    tmp = eta.detach().clone().transpose(1, 2).reshape(-1)
-    points, values = [], []
-    for ind, sub in enumerate(tmp.cpu().tolist()):
-        if sub != 0:
-            points.append(ind)
-            values.append(sub)
-
-    if len(points) > n:
-        order = sorted(range(len(points)), key=lambda i: abs(values[i]), reverse=True)[:n]
-        points = [points[i] for i in order]
-        values = [values[i] for i in order]
-
-    # nVITA 有时生成不足 n 个非零扰动，用"无攻击"类兜底
-    while len(points) < n:
-        points.append(no_attack_class)
-        values.append(0.0)
-
-    return (torch.tensor(points, dtype=torch.long).unsqueeze(0),
-            torch.tensor(values, dtype=torch.float).unsqueeze(0))
-
-
-def get_LBA_Dataset(X_clean, X_adv, n, device, beta=1.0):
-    """
-    逐样本提取 nVITA 敏感点标签，构建 LBA 训练集（对齐官方 get_LBA_Dataset）
-
-    beta: nVITA 扰动预算系数（原论文 β）。不同特征上 nVITA 找到的真实扰动值
-    幅值差异很大（敏感特征扰动值大、不敏感特征扰动值小），直接用原始值作为回归
-    标签会导致不同特征上回归任务的难易程度不一致。这里将标签除以 beta 归一化到
-    大致 [-1, 1] 范围，使回归头在各特征上的学习难度更一致，不再需要额外的损失权重。
-    对应的还原(乘回 beta)在 run_lba_attack 中完成。
-    """
-    lba_data = LBA_Dataset(device=device)
-    for ind in range(X_clean.shape[0]):
-        X_current = X_clean[ind].unsqueeze(0)
-        X_current_adv = X_adv[ind].unsqueeze(0)
-        point, values = get_sensitive_point_and_value(X_current_adv - X_current, n)
-        values = values / beta if beta else values  # 归一化扰动值标签，消除特征间尺度差异
-        lba_data.add_X(X_current)
-        lba_data.add_Y(point)
-        lba_data.add_value(values)
-    return lba_data
-
-
-def build_sensitive_labels(X_adv, X_clean, n):
-    """
-    批量提取敏感点位置与扰动值，用于 LBA 拟合质量评估
-    返回: points (N, n) long, values (N, n) float
-    """
-    points_all, values_all = [], []
-    for ind in range(X_clean.shape[0]):
-        p, v = get_sensitive_point_and_value(
-            X_adv[ind].unsqueeze(0) - X_clean[ind].unsqueeze(0), n)
-        points_all.append(p)
-        values_all.append(v)
-    return torch.cat(points_all, dim=0), torch.cat(values_all, dim=0)
-
-
-def print_sign_distribution(values_true, label):
-    """
-    打印 nVITA 真实扰动值的正/负分布统计，用于诊断训练子集与评估子集的
-    nVITA 敏感方向是否存在真实的分布漂移（时序划分可能导致训练/评估子集处于
-    不同风况区间，使得敏感方向本身就不一致，无法通过调损失函数修复）
-    """
-    v = values_true.detach().cpu().numpy().flatten()
-    nz = v[v != 0]
-    if len(nz) == 0:
-        print(f"  [标签方向分布/{label}] 无非零扰动样本")
-        return
-    pos_pct = (nz > 0).mean() * 100
-    neg_pct = (nz < 0).mean() * 100
-    print(f"  [标签方向分布/{label}] 非零样本数={len(nz)}, 正扰动占比={pos_pct:.1f}%, "
-          f"负扰动占比={neg_pct:.1f}%, 均值={nz.mean():.6f}")
-
-
-def train_lba_model(train_data, model, batch_size=25, learning_rate=0.005, epochs=50,
-                    device='cpu', print_info=False, n=1, use_bayesian=False, dir_weight=1.0):
-    """
-    训练 LBA 模型（对齐 LearningBased_Atk/attacks/LBA/LBA_model.py::train_model）
-    分类损失: CrossEntropyLoss，标签为敏感点位置索引（含"无攻击"类）
-    回归损失: MSELoss + 方向一致性惩罚，直接监督 n 个扰动值输出
-    两个主损失（分类/回归）仍分别独立 backward（分类损失保留计算图），随后统一 step
-    与官方一致：贝叶斯层不向损失额外添加 KL 项，不确定性仅由重参数化采样引入
-
-    dir_weight: 方向一致性惩罚权重。MSELoss 只关心预测值与真实值的数值距离，对于幅值本身就很
-    小的弱特征，即使预测符号完全反了，只要预测值也很小，loss 仍会很小，导致方向学反但训练损失
-    看不出异常。这里在 MSE 基础上叠加 relu(-pred*true) 作为方向惩罚：两者符号一致时为 0，
-    符号相反时为正值且对 pred 的梯度不依赖于当前幅值大小，能在幅值接近 0 时仍然主动把预测拉向正确方向。
-    """
-    criterion_cls = nn.CrossEntropyLoss()
-    criterion_atk = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    if dir_weight < 0:
-        # dir_weight 为负数会让模型主动学习与真实符号相反的方向（等价于故意训练反向攻击），
-        # 一定是误配置，这里直接纠正为 0 并告警，而不是静默产生反向学习的结果
-        print(f"  [警告] dir_weight={dir_weight} 为负数，会导致方向惩罚变成\"鼓励学反\"，已自动纠正为 0")
-        dir_weight = 0.0
-
-    loss_cls_list = []
-    loss_reg_list = []
-
-    model.to(device)
-    model.train()
-
-    for epoch in range(epochs):
-        total_loss_cls = 0.0
-        total_loss_atk = 0.0
-        total_dir_penalty = 0.0
-
-        train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=True)
-        for inputs, label, value in train_dataloader:
-            inputs = inputs.to(device)
-            label = label.to(device)
-            value = value.to(device)
-
-            outputs_cls, output_atk = model(inputs)
-
-            optimizer.zero_grad()
-            if n == 1:
-                # 与官方一致：单敏感点时标签展平为 (batch,)
-                loss_cls = criterion_cls(outputs_cls, label.view(-1).long())
-            else:
-                # n>1 时对每个敏感点位置分别计算 CE 后取均值
-                loss_cls = sum(criterion_cls(outputs_cls, label[:, k].long())
-                               for k in range(n)) / n
-            loss_atk_mse = criterion_atk(output_atk, value.float())
-            # 方向一致性惩罚：预测值与真实值符号不一致时施加惩罚，不依赖幅值大小，弥补 MSE 对小幅值、符号错情况的惩罚不足
-            dir_penalty = torch.relu(-output_atk * value.float()).mean()
-            loss_atk = loss_atk_mse + dir_weight * dir_penalty
-
-            loss_cls.backward(retain_graph=True)
-            loss_atk.backward()
-            optimizer.step()
-
-            total_loss_cls += loss_cls.item()
-            total_loss_atk += loss_atk_mse.item()
-            total_dir_penalty += dir_penalty.item()
-
-        # 与官方一致：按样本总数归一化
-        avg_cls = total_loss_cls / len(train_data)
-        avg_atk = total_loss_atk / len(train_data)
-        avg_dir = total_dir_penalty / len(train_data)
-        loss_cls_list.append(avg_cls)
-        loss_reg_list.append(avg_atk)
-
-        if print_info and (epoch + 1) % 10 == 0:
-            print(f"  LBA Epoch {epoch + 1}/{epochs}, Cls Loss: {avg_cls:.6f}, "
-                  f"Atk Loss(MSE): {avg_atk:.6f}, Dir Penalty: {avg_dir:.6f}")
-
-    return loss_cls_list, loss_reg_list
-
 
 # =============================================================================
-# SECTION 6b: LBA 拟合能力评估指标
+# SECTION 6: NVITA_NSGA2 - NSGA-II 变长编码双目标稀疏对抗攻击（L0 作为约束）
 # =============================================================================
-
-def calc_sensitive_point_ar(points_true, cls_logits, n):
-    """
-    计算敏感点预测准确率 AR（Accuracy Rate），对应原论文公式 (10)
-    与官方 exp.py 一致采用整体匹配：LBA 预测的 Top-n 位置集合需与 nVITA 真实敏感点完全一致
-    官方直接比较两个 list，这里先排序再比较，避免 topk 返回顺序干扰（n=1 时两者等价）
-
-    points_true: (batch, n) nVITA 真实敏感点位置索引
-    cls_logits:  (batch, features*windows + 1) LBA 分类头输出
-    n:           每个样本的扰动点数
-    """
-    batch_size = points_true.shape[0]
-    _, top_pred = torch.topk(cls_logits, n, dim=1)
-    correct = 0
-    for i in range(batch_size):
-        true_pos = sorted(int(v) for v in points_true[i].cpu().numpy().tolist())
-        pred_pos = sorted(int(v) for v in top_pred[i].cpu().numpy().tolist())
-        if true_pos == pred_pos:
-            correct += 1
-    return correct / batch_size if batch_size > 0 else 0.0
-
-
-def calc_perturb_rmse(values_true, values_pred):
-    """
-    计算扰动值预测 RMSE
-    回归头只输出 n 个值，与 nVITA 真实敏感点扰动值逐位对应
-
-    values_true: (batch, n) nVITA 真实扰动值
-    values_pred: (batch, n) LBA 预测扰动值
-    """
-    if values_true.numel() == 0:
-        return 0.0
-    rmse = torch.sqrt(F.mse_loss(values_pred.float(), values_true.float()))
-    return rmse.item()
-
-
-def evaluate_lba_fitting_quality(lba_model, X_eval, points_true, values_true, n, device, batch_size=64, beta=1.0):
-    """
-    批量评估 LBA 模型的拟合质量，返回 AR 和扰动 RMSE
-    lba_model:   已训练的 LBA 模型
-    X_eval:      (N, windows_cnt, features_cnt) 评估集原始输入
-    points_true: (N, n) nVITA 真实敏感点位置
-    values_true: (N, n) nVITA 真实扰动值(真实尺度，未归一化)
-    beta: 回归头输出的是归一化后的扰动值，需乘回 beta 还原为真实尺度后才能与
-           values_true 在同一尺度下计算 RMSE
-    """
-    lba_model.to(device)
-    lba_model.eval()
-    all_cls_logits = []
-    all_atk_values = []
-    N = X_eval.shape[0]
-    with torch.no_grad():
-        for start in range(0, N, batch_size):
-            end = min(start + batch_size, N)
-            X_batch = X_eval[start:end].to(device)
-            cls_logits, atk_values = lba_model(X_batch)
-            all_cls_logits.append(cls_logits)
-            all_atk_values.append(atk_values)
-    all_cls_logits = torch.cat(all_cls_logits, dim=0)
-    all_atk_values = torch.cat(all_atk_values, dim=0)
-    all_atk_values_denorm = all_atk_values * beta  # 将归一化扰动值还原为真实尺度
-
-    ar = calc_sensitive_point_ar(points_true, all_cls_logits, n)
-    perturb_rmse = calc_perturb_rmse(values_true.to(device), all_atk_values_denorm)
-    return ar, perturb_rmse
-
-
-# =============================================================================
-# SECTION 7: NVITA_NSGA2 - NSGA-II 双目标稀疏对抗攻击
-# =============================================================================
-# 基于 NSGA-II 的 nVITA 稀疏黑盒攻击，同时优化两个目标:
-#   目标1(最小化): 扰动 L2 范数——值越小，扰动越隐蔽、越难检测
-#   目标2(最小化): -RSE，其中 RSE = sqrt(攻击后MSE / 干净预测MSE)
-#   等价于最大化攻击导致的 RMSE 相对上升率；RSE 越大代表攻击效果越强
-# 完全保留原 nVITA 的三元组稀疏编码、动态扰动预算、特征约束等功能
+# 【双目标】基于 NSGA-II 的 nVITA 稀疏黑盒攻击，同时优化两个目标（全部最小化）:
+#   目标1: 扰动 L2 范数——值越小，扰动越隐蔽、越难检测
+#   目标2: -RSE，其中 RSE = sqrt(攻击后MSE / 干净预测MSE)
+#          RSE 越大代表攻击效果越强，取负号后统一为最小化方向（替代原双目标版的 1/RSE）
+# 【L0 约束】n_actual 实际扰动点数（去重后真实数量，即 L0 范数）不再进入目标向量，
+#          而是作为约束变量：要求 n_actual ∈ [n_min, n_max]，
+#          违约度 cv = max(0, n_actual-n_max) + max(0, n_min-n_actual)，
+#          非支配排序采用 Deb 约束支配（可行优先 → 二维目标支配 → 违约度比较）
+# 【变长编码】个体为 n 组三元组 [t1,f1,p1, ..., tn,fn,pn] 拼接成的一维向量，长度 3n 随 n 变化，
+#          n ∈ [n_min, n_max]；完全保留原 nVITA 的动态扰动预算（窗口极差）、特征约束等功能
 # =============================================================================
 
 
 class NVITA_NSGA2:
     """
-    基于 NSGA-II 的双目标稀疏黑盒对抗攻击
-    编码方式：n组 (时间步t, 特征f, 扰动值p) 展平为 3n 维向量
-    双目标（最小化）：
-        obj[0] = ||p||_2  （扰动 L2 范数）
-        obj[1] = -RSE     （RSE = sqrt(攻击后MSE / 干净预测MSE)）
-    完全保留原 nVITA 的三元组编码、动态窗口极差预算、特征约束等功能
+    基于 NSGA-II 的双目标变长稀疏黑盒对抗攻击（L0 作为约束）
+
+    【变长编码】n 组 (时间步t, 特征f, 扰动值p) 展平为 3n 维一维向量，
+                n 在 [n_min, n_max] 内逐个体独立变化（不再是固定的 self.n）
+    【双目标】（全部最小化）：
+        obj[0] = ||p||_2   扰动 L2 范数（越小越隐蔽）
+        obj[1] = -RSE      RSE = sqrt(攻击后MSE / 干净预测MSE)，取负号后越小=攻击越强
+    【L0 约束】n_actual（去重后真实扰动点数）不进入目标向量，作为约束变量：
+        要求 n_actual ∈ [n_min, n_max]，违约度 cv = max(0, n-n_max) + max(0, n_min-n)，
+        非支配排序采用 Deb 约束支配（可行优先 → 二维目标支配 → 违约度比较）
     """
 
-    def __init__(self, n, epsilon, model, feature_ranges, maxiter=60, pop_size=30,
+    def __init__(self, n_min, n_max, epsilon, model, feature_ranges, maxiter=60, pop_size=30,
                  eta_c=15, eta_m=20, crossover_prob=0.9,
                  feature_constraint=None, perturb_features=None,
-                 use_window_range=True, init_strategy='random'):
-        self.n = n                      # 最大扰动点数
+                 use_window_range=True, init_strategy='random', select_mode='knee',
+                 knee_min_rse=2.0, insert_prob=0.1, delete_prob=0.1):
+        # ====== 【变长编码】用 [n_min, n_max] 区间取代原固定 self.n ======
+        self.n_min = max(1, int(n_min))            # 扰动点数下界
+        self.n_max = max(self.n_min, int(n_max))   # 扰动点数上界（自动纠正 n_min > n_max 的误配置）
         self.epsilon = epsilon          # 扰动预算系数
         self.model = model
         self.feature_ranges = feature_ranges  # 全局特征取值范围回退值
@@ -1357,6 +928,11 @@ class NVITA_NSGA2:
         self.perturb_features = perturb_features
         self.use_window_range = use_window_range
         self.init_strategy = init_strategy  # 'random' / 'sensitivity'
+        self.select_mode = select_mode      # 最终解选择策略：'knee'=归一化折中膝点（默认）/ 'max_rse'=攻击强度上界端点（消融对比用）
+        self.knee_min_rse = knee_min_rse    # 膝点有效性下界：仅 RSE>=该值的前沿点可作膝点候选，防止弱前沿上膝点退化为近零效果点
+        # ====== 【变长编码】长度变异的两个独立概率 ======
+        self.insert_prob = insert_prob      # 插入变异概率：随机新增一个三元组，n+1
+        self.delete_prob = delete_prob      # 删除变异概率：随机删除一个三元组，n-1
 
     def _get_window_range(self, x_np):
         """计算当前样本每个特征的窗口极差（对齐官方 calculate_test_window_ranges）"""
@@ -1376,15 +952,45 @@ class NVITA_NSGA2:
             return np.arange(num_features)
         return np.random.choice(num_features, self.feature_constraint, replace=False)
 
-    def _init_individual(self, seq_len, num_features, allowed_features, ranges):
-        """初始化一个个体: n组 (时间步, 特征, 扰动值) 展平为 3n 维向量
-        确保 n 个扰动点的 (时间步, 特征) 位置唯一，避免重复扰动
+    @staticmethod
+    def _num_points(individual):
+        """【变长编码】由向量长度反解当前个体的扰动点数 n = len(individual) // 3"""
+        return len(individual) // 3
+
+    def _random_new_point(self, seq_len, allowed_features, ranges, existing):
+        """【变长编码】随机生成一个与 existing 中 (t,f) 不重复的新三元组
+        供「插入变异」与「长度补齐」复用，幅值按该特征的动态预算 epsilon*range[f] 采样
+        返回: ([t, f, p], (t, f))
         """
+        if len(allowed_features) == 0:
+            return [0.0, 0.0, 0.0], (0, 0)
+        for _ in range(200):
+            t = int(np.random.randint(0, seq_len))
+            f = int(np.random.choice(allowed_features))
+            if (t, f) not in existing:
+                budget = self.epsilon * ranges[f]
+                p = float(np.random.uniform(-budget, budget)) if budget > 0 else 0.0
+                return [float(t), float(f), p], (t, f)
+        # 兜底：位置空间被占满时允许重复，交由 _repair_unique 合并幅值
+        t = int(np.random.randint(0, seq_len))
+        f = int(np.random.choice(allowed_features))
+        budget = self.epsilon * ranges[f]
+        p = float(np.random.uniform(-budget, budget)) if budget > 0 else 0.0
+        return [float(t), float(f), p], (t, f)
+
+    def _init_individual(self, seq_len, num_features, allowed_features, ranges):
+        """【变长编码】初始化一个个体，输出长度为 3n 的一维向量
+        步骤:
+          1) 先从 [n_min, n_max] 中均匀随机采样一个整数 n
+          2) 再生成 n 个互不重复的 (t,f) 位置，每个位置按动态预算 epsilon*range[f] 采样幅值 p
+          3) 拼接为 [t1,f1,p1, ..., tn,fn,pn]
+        """
+        n = int(np.random.randint(self.n_min, self.n_max + 1))   # 变长：逐个体随机采样扰动点数
         positions = set()
         ind = []
-        max_attempts = self.n * 100
+        max_attempts = n * 100
         attempts = 0
-        while len(positions) < self.n and attempts < max_attempts:
+        while len(positions) < n and attempts < max_attempts:
             t = np.random.randint(0, seq_len)
             f = int(np.random.choice(allowed_features))
             pos_key = (t, f)
@@ -1394,27 +1000,27 @@ class NVITA_NSGA2:
                 p = np.random.uniform(-budget, budget) if budget > 0 else 0.0
                 ind.extend([float(t), float(f), p])
             attempts += 1
-        while len(positions) < self.n:
-            t = np.random.randint(0, seq_len)
-            f = int(np.random.choice(allowed_features))
-            budget = self.epsilon * ranges[f]
-            p = np.random.uniform(-budget, budget) if budget > 0 else 0.0
-            ind.extend([float(t), float(f), p])
-            positions.add((t, f))
-        return np.array(ind)
+        # 位置空间不足时兜底补齐，保证输出长度恒为 3n
+        while len(ind) // 3 < n:
+            new_point, pos_key = self._random_new_point(seq_len, allowed_features, ranges, positions)
+            positions.add(pos_key)
+            ind.extend(new_point)
+        return np.array(ind, dtype=float)
 
     def _apply_perturbation(self, x_np, individual):
         """将个体编码的扰动应用到输入样本上（检测重复 (t,f) 并合并幅值）
         交叉/变异后两个三元组可能落到同一位置，此处合并幅值避免重复计数，
-        保证实际扰动点数 ≤ n，L0 稀疏性诚实反映。
+        保证 L0 稀疏性诚实反映。
+        【变长编码适配】扰动点数 n 由 len(individual)//3 反解，其余逻辑不变。
         """
         x_adv = x_np.copy()
         seq_len = x_np.shape[1]
         num_features = x_np.shape[2]
+        n_points = self._num_points(individual)   # 变长：n 随个体长度变化
 
         # 检测重复位置并合并幅值
         perturbation_map = {}
-        for i in range(self.n):
+        for i in range(n_points):
             t = int(np.clip(round(individual[3 * i]), 0, seq_len - 1))
             f = int(np.clip(round(individual[3 * i + 1]), 0, num_features - 1))
             p = individual[3 * i + 2]
@@ -1431,32 +1037,72 @@ class NVITA_NSGA2:
         return x_adv
 
     def _evaluate_objectives(self, x_np, y_val, individual, device):
-        """计算双目标：
-        目标1: 扰动 L₂ 范数（所有扰动值的平方和开根号）
-        目标2: 1/RSE（RSE = sqrt(攻击后MSE / 干净预测MSE)）
-        两目标均最小化，理想点收敛到原点 (0, 0)
+        """【双目标 + L0 约束】计算目标向量与约束变量，返回 (obj, n_actual)：
+        obj: shape=(2,)，两个目标全部为最小化方向
+            目标1: 扰动 L₂ 范数（从合并后的 perturbation_map 计算，和 _apply_perturbation 口径一致）
+            目标2: -RSE（RSE = sqrt(攻击后MSE / 干净预测MSE)，取负号后攻击越强目标值越小）
+        n_actual: 实际扰动点数（用 perturbation_map 的真实键数，即去重后的 L0 范数，
+               不直接用编码长度反解的 n，避免重复位置虚增点数）。
+               【L0 约束】不再作为第三目标进入 obj，而是作为约束变量随 obj 一并返回，
+               用于违约度计算、knee tie-break 与前沿记录的附带属性。
         """
         x_adv = self._apply_perturbation(x_np, individual)
         with torch.no_grad():
             pred_adv = self.model(torch.FloatTensor(x_adv).to(device)).item()
             pred_clean = self.model(torch.FloatTensor(x_np).to(device)).item()
 
-        # 目标1: 扰动 L₂ 范数
-        p_vals = individual[2::3]
-        l2_norm = np.sqrt(np.sum(p_vals ** 2))
+        # 目标1: 扰动 L₂ 范数（重复位置幅值相加后平方，与扰动施加口径一致）
+        seq_len = x_np.shape[1]
+        num_features = x_np.shape[2]
+        n_points = self._num_points(individual)   # 变长：n 由个体长度反解
+        perturbation_map = {}
+        for i in range(n_points):
+            t = int(np.clip(round(individual[3 * i]), 0, seq_len - 1))
+            f = int(np.clip(round(individual[3 * i + 1]), 0, num_features - 1))
+            p = individual[3 * i + 2]
+            key = (t, f)
+            if key in perturbation_map:
+                perturbation_map[key] += p
+            else:
+                perturbation_map[key] = p
+        l2_norm = np.sqrt(sum(p ** 2 for p in perturbation_map.values()))
 
-        # 目标2: 1/RSE（RSE 的倒数，越小越好）
+        # 目标2: -RSE（RSE 越大攻击越强 → 取负号后越小越好，替代原双目标版的 1/RSE）
         adv_mse = (pred_adv - y_val) ** 2
         clean_mse = (pred_clean - y_val) ** 2
         rse = np.sqrt(adv_mse / clean_mse) if clean_mse > 1e-10 else 10.0
-        inv_rse = 1.0 / rse
+        neg_rse = -rse
 
-        return np.array([l2_norm, inv_rse])
+        # 约束变量: n_actual 实际扰动点数（去重后 perturbation_map 的真实键数 = L0 范数）
+        n_actual = float(len(perturbation_map))
+
+        return np.array([l2_norm, neg_rse]), n_actual
+
+    def _constraint_violation(self, n_actual_arr):
+        """【L0 约束】计算违约度 cv = max(0, n_actual - n_max) + max(0, n_min - n_actual)
+        cv = 0 表示个体可行（n_actual ∈ [n_min, n_max]）；cv 越大违约越严重。
+        变长交叉/变异本就把点数控制在 [n_min, n_max]，因此绝大多数个体可行；
+        违约度主要用于 Deb 约束支配中不可行个体之间的比较。
+        """
+        n = np.asarray(n_actual_arr, dtype=float)
+        return np.maximum(0.0, n - self.n_max) + np.maximum(0.0, self.n_min - n)
 
     @staticmethod
-    def _fast_non_dominated_sort(objectives):
-        """快速非支配排序（最小化问题）
-        支配规则：个体 i 支配 j 当且仅当 i 的所有目标 <= j 且至少一个目标 < j
+    def _fast_non_dominated_sort(objectives, cv):
+        """快速非支配排序（最小化问题，Deb 约束支配版）
+        【动机】目标向量由三维 (L2, -RSE, n_actual) 改回二维 (L2, -RSE)：
+            n_actual 不再作为第三目标，而是以违约度 cv 的形式进入约束支配。
+            真正缓解“第一前沿过早吞没种群”的是删除冗余的第三目标维度
+            （三目标下几乎人人互不支配，front0 迅速≈pop_size）；
+            变长交叉/变异本就把点数控制在 [n_min, n_max]，绝大多数个体可行，
+            引入约束支配是为了框架正确并防止任何超长个体。
+        约束支配规则（Deb constrained-domination）：个体 i 约束支配 j 当且仅当下列之一：
+            (a) i 可行(cv_i=0) 而 j 不可行(cv_j>0)；
+            (b) i、j 都可行，且 i 在二维目标上标准 Pareto 支配 j
+                （all(obj_i<=obj_j) 且 any(obj_i<obj_j)）；
+            (c) i、j 都不可行，且 cv_i < cv_j。
+        分层递推流程与标准 NSGA-II 完全一致，只把两两比较替换为上述规则。
+        参数：objectives shape=(N,2) 目标值矩阵；cv shape=(N,) 违约度向量
         返回值：(fronts, rank)
             fronts: list of list，每层 Pareto 前沿的索引列表
             rank: array，每个个体的非支配层级（0 为最优）
@@ -1465,14 +1111,26 @@ class NVITA_NSGA2:
         domination_count = np.zeros(pop_size, dtype=int)
         dominated_set = [[] for _ in range(pop_size)]
 
+        def _constr_dominates(i, j):
+            """判定个体 i 是否约束支配个体 j（规则 a/b/c）"""
+            fi, fj = cv[i] <= 0.0, cv[j] <= 0.0
+            if fi and not fj:
+                return True                                    # (a) 可行支配不可行
+            if fi and fj:
+                # (b) 都可行：二维目标上的标准 Pareto 支配
+                return bool(np.all(objectives[i] <= objectives[j])
+                            and np.any(objectives[i] < objectives[j]))
+            if not fi and not fj:
+                return cv[i] < cv[j]                             # (c) 都不可行：违约度小者胜
+            return False                                         # i 不可行而 j 可行：必不支配
+
         for i in range(pop_size):
             for j in range(pop_size):
                 if i == j:
                     continue
-                dominates = np.all(objectives[i] <= objectives[j]) and np.any(objectives[i] < objectives[j])
-                if dominates:
+                if _constr_dominates(i, j):
                     dominated_set[i].append(j)
-                elif np.all(objectives[j] <= objectives[i]) and np.any(objectives[j] < objectives[i]):
+                elif _constr_dominates(j, i):
                     domination_count[i] += 1
 
         fronts = []
@@ -1498,8 +1156,10 @@ class NVITA_NSGA2:
     @staticmethod
     def _crowding_distance(objectives, fronts):
         """拥挤距离计算
-        每个目标按自身值域做归一化，避免量纲差异导致某一目标主导选择结果
-        边界点距离设为无穷大，优先保留边界解
+        每个目标按自身值域做归一化，避免两个目标量级差异（L2~1e-2、-RSE~1e0）
+        导致某一目标主导选择结果；边界点距离设为无穷大，优先保留边界解
+        说明：按 n_obj = objectives.shape[1] 循环实现，双目标下 n_obj=2；
+              n_actual 为约束变量不参与拥挤距离
         """
         pop_size = objectives.shape[0]
         n_obj = objectives.shape[1]
@@ -1532,8 +1192,10 @@ class NVITA_NSGA2:
         """二元锦标赛选择
         第一优先级：非支配层级 rank（越小越优）
         第二优先级：拥挤距离（越大越优，维持种群多样性）
+        【变长编码适配】仅把种群容器从 ndarray 换成 list（个体长度不一，无法堆成矩形矩阵），
+        选择判据只依赖 rank/crowding，与编码长度和目标维度均无关，逻辑完全不变
         """
-        n = population.shape[0]
+        n = len(population)
         selected = []
         while len(selected) < pop_size:
             i, j = np.random.choice(n, 2, replace=False)
@@ -1545,104 +1207,175 @@ class NVITA_NSGA2:
                 selected.append(population[i].copy())
             else:
                 selected.append(population[j].copy())
-        return np.array(selected)
+        return selected
 
-    def _usx_crossover(self, parent1, parent2, seq_len, num_features, ranges):
-        """均匀集合交叉（Uniform Set Crossover, USX）
-        SA-MOO 风格集合式交叉：以整个三元组 (t,f,p) 为最小交换单位，
-        随机选取若干三元组整体互换，彻底规避整数位「加权平均→取整→变回原值」的无效交叉。
-        稀疏攻击的个体本质是 n 个扰动点组成的无序集合，而非线性连续向量。
-        参数：crossover_prob = 0.9（eta_c 分布指数保留接口兼容，集合式交叉不再使用）
+    def _clip_tf_budget(self, c, seq_len, num_features, ranges):
+        """统一的合法性修正：t/f 取整截断，p 按动态预算截断
+        【变长编码适配】循环上界由固定 self.n 改为 len(c)//3，逻辑不变
+        """
+        n_points = self._num_points(c)
+        for k in range(n_points):
+            c[3*k]   = float(np.clip(round(c[3*k]),   0, seq_len - 1))
+            c[3*k+1] = float(np.clip(round(c[3*k+1]), 0, num_features - 1))
+            bud = self.epsilon * ranges[int(c[3*k+1])]
+            c[3*k+2] = float(np.clip(c[3*k+2], -bud, bud))
+        return c
+
+    def _repair_unique(self, c, seq_len, allowed_features):
+        """【变长编码】位置去重：合并重复 (t,f) 位置上的幅值
+        固定长度版通过「挪动 t/f」保证 n 个位置互不重复；变长版改为直接合并重复位置的幅值，
+        因此去重后个体长度可能缩短（n 减小），随后由 _enforce_length_bounds 拉回 [n_min, n_max]。
+        注意：返回值长度可能变化，调用方必须接收返回值而不是原地使用 c。
+        allowed_features 形参保留以兼容原调用签名（本实现不再需要挪动 f）。
+        """
+        c = np.asarray(c, dtype=float)
+        n_points = self._num_points(c)
+        merged, order = {}, []
+        for k in range(n_points):
+            t = int(np.clip(round(c[3*k]), 0, seq_len - 1))
+            f = int(round(c[3*k+1]))
+            key = (t, f)
+            if key in merged:
+                merged[key] += float(c[3*k+2])   # 重复位置幅值相加
+            else:
+                merged[key] = float(c[3*k+2])
+                order.append(key)                # 保留首次出现顺序，维持基因相对次序
+        out = []
+        for key in order:
+            out.extend([float(key[0]), float(key[1]), merged[key]])
+        return np.array(out, dtype=float)
+
+    def _enforce_length_bounds(self, c, seq_len, num_features, ranges, allowed_features):
+        """【变长编码】长度合法性修复：把扰动点数 n 拉回 [n_min, n_max]
+        1) 长度截断：若 n > n_max，随机删除扰动点直到 n == n_max
+        2) 长度补齐：若 n < n_min，随机新增不重复扰动点直到 n == n_min
+        （去重合并、交叉尾部交换都可能让 n 越界，故交叉/变异末尾统一调用）
+        """
+        c = np.asarray(c, dtype=float)
+        n_points = self._num_points(c)
+
+        # ---- 1) 长度截断 ----
+        while n_points > self.n_max:
+            drop = int(np.random.randint(0, n_points))
+            kept = [c[3*k:3*k+3] for k in range(n_points) if k != drop]
+            c = np.concatenate(kept).astype(float)
+            n_points -= 1
+
+        # ---- 2) 长度补齐 ----
+        while n_points < self.n_min:
+            existing = {(int(round(c[3*k])), int(round(c[3*k+1]))) for k in range(n_points)}
+            new_point = np.array(self._random_new_point(seq_len, allowed_features, ranges, existing)[0],
+                                 dtype=float)
+            c = np.concatenate([c, new_point]) if n_points > 0 else new_point
+            n_points += 1
+
+        return c
+
+    def _crossover(self, parent1, parent2, seq_len, num_features, ranges, allowed_features):
+        """【变长编码】变长单点交叉 + 三步合法性修复
+        1) 两个父代长度可不同（3n1 / 3n2），分别在各自的三元组边界上随机选一个交叉点，
+           交换尾部片段生成两个子代（子代长度因此天然可变）
+        2) 位置去重：_repair_unique 合并重复 (t,f) 位置的幅值（n 可能减小）
+        3) 长度截断/补齐：_enforce_length_bounds 把 n 拉回 [n_min, n_max]
+        4) 预算截断：_clip_tf_budget 按最终 f 的动态预算截断幅值
+           （先去重再截断：修复过程可能改变 f，须按新 f 的预算重截 p）
         """
         if np.random.random() > self.crossover_prob:
             return parent1.copy(), parent2.copy()
 
-        child1 = parent1.copy()
-        child2 = parent2.copy()
+        parent1 = np.asarray(parent1, dtype=float)
+        parent2 = np.asarray(parent2, dtype=float)
+        n1 = self._num_points(parent1)
+        n2 = self._num_points(parent2)
 
-        # 随机确定本次交换的三元组数量（至少 1 个）
-        swap_num = np.random.randint(1, self.n + 1)
-        # 从 0~n-1 中不重复采样待交换的三元组序号
-        swap_indices = np.random.choice(self.n, size=swap_num, replace=False)
+        # 交叉点只能落在三元组边界 3k 上，k ∈ [0, n]：k=0 表示整条交给对方，k=n 表示保留整条
+        k1 = int(np.random.randint(0, n1 + 1))
+        k2 = int(np.random.randint(0, n2 + 1))
+        head1, tail1 = parent1[:3*k1].copy(), parent1[3*k1:].copy()
+        head2, tail2 = parent2[:3*k2].copy(), parent2[3*k2:].copy()
+        # 交换尾部片段 → 两个变长子代
+        c1 = np.concatenate([head1, tail2]).astype(float)
+        c2 = np.concatenate([head2, tail1]).astype(float)
 
-        # 以整个三元组为单位互换
-        for k in swap_indices:
-            base = 3 * k
-            child1[base:base + 3], child2[base:base + 3] = (
-                parent2[base:base + 3].copy(), parent1[base:base + 3].copy()
-            )
+        repaired = []
+        for c in (c1, c2):
+            c = self._repair_unique(c, seq_len, allowed_features)                                   # 位置去重
+            c = self._enforce_length_bounds(c, seq_len, num_features, ranges, allowed_features)     # 长度截断/补齐
+            c = self._clip_tf_budget(c, seq_len, num_features, ranges)                              # 预算截断
+            repaired.append(c)
+        return repaired[0], repaired[1]
 
-        # 合法性修正：t/f 取整截断，p 按动态预算截断
-        for child in [child1, child2]:
-            for k in range(self.n):
-                child[3 * k] = float(np.clip(round(child[3 * k]), 0, seq_len - 1))
-                child[3 * k + 1] = float(np.clip(round(child[3 * k + 1]), 0, num_features - 1))
-                f_idx = int(child[3 * k + 1])
-                budget = self.epsilon * ranges[f_idx]
-                child[3 * k + 2] = np.clip(child[3 * k + 2], -budget, budget)
-
-        return child1, child2
-
-    def _polynomial_mutation(self, individual, seq_len, num_features, ranges, allowed_features=None):
-        """分维度定制变异（SA-MOO 风格集合式变异）
-        逐三元组独立处理，三个维度采用最适配的策略：
-        t（离散时间步）: 15% 触发，70% 邻域±1步移动（时序局部相关性，扰动更平滑）+ 30% 全局重采样
-        f（离散特征）  : 15% 触发，从 allowed_features 中均匀重采样（遵守特征约束，避免小步变化被 round 抹掉）
-        p（连续幅值）  : 1/n 触发，保留标准 PM 多项式变异（eta_m 分布指数沿用），按动态预算截断
-        allowed_features: 允许扰动的特征索引列表，None 时退化为全特征采样
+    def _mutation(self, individual, seq_len, num_features, ranges, allowed_features):
+        """【变长编码】三类变异协同（三类变异概率相互独立）
+        1) 点级变异（概率最高，逐三元组独立触发，与固定长度版逻辑一致）：
+           分别以一定概率修改 t（70% 邻域 / 30% 全局）、f（allowed_features 均匀重采样）
+           或 p（归一化到 [0,1] 做标准多项式变异 PM，再线性映回 [-budget, budget]）
+        2) 插入变异（概率 self.insert_prob，默认 0.1）：随机新增一个不重复的 (t,f,p) 三元组，
+           n+1，且插入后不超过 n_max
+        3) 删除变异（概率 self.delete_prob，默认 0.1）：随机删除一个三元组，
+           n-1，且删除后不低于 n_min
+        变异后统一执行 _repair_unique + _enforce_length_bounds + _clip_tf_budget 合法性修复
         """
-        mutant = individual.copy()
+        mutant = np.asarray(individual, dtype=float).copy()
+        n_points = self._num_points(mutant)
 
-        for k in range(self.n):
-            base = 3 * k
-
-            # (1) 时间步 t 变异（每个三元组独立判断，触发概率 15%）
+        # ---------- 1) 点级变异 ----------
+        for k in range(n_points):
+            b = 3 * k
+            # 时间步 t：保留原触发率与「70% 邻域 / 30% 全局」策略
             if np.random.random() < 0.15:
-                t_cur = int(round(mutant[base]))
-                if np.random.random() < 0.7:
-                    # 70%：邻域 ±1 步移动
-                    t_new = t_cur + np.random.choice([-1, 1])
-                else:
-                    # 30%：全局重采样
-                    t_new = np.random.randint(0, seq_len)
-                mutant[base] = float(np.clip(t_new, 0, seq_len - 1))
-
-            # (2) 特征 f 变异（每个三元组独立判断，触发概率 15%）
-            if np.random.random() < 0.15:
-                if allowed_features is not None and len(allowed_features) > 0:
-                    mutant[base + 1] = float(np.random.choice(allowed_features))
-                else:
-                    mutant[base + 1] = float(np.random.randint(0, num_features))
-
-            # (3) 扰动值 p 变异（触发概率 1/n，平均每次变异 1 个幅值）
-            if np.random.random() < 1.0 / self.n:
+                t_cur = int(round(mutant[b]))
+                t_new = t_cur + np.random.choice([-1, 1]) if np.random.random() < 0.7 \
+                    else np.random.randint(0, seq_len)
+                mutant[b] = float(np.clip(t_new, 0, seq_len - 1))
+            # 特征 f：从 allowed_features 均匀重采样（保留原逻辑）
+            if np.random.random() < 0.15 and len(allowed_features) > 0:
+                mutant[b+1] = float(np.random.choice(allowed_features))
+            # 扰动值 p：先把 p 归一化到 [0,1] 做标准 PM，再映回 [-budget, budget]
+            #            触发率沿用原逻辑 1/n（变长下 n 由当前个体长度反解）
+            if np.random.random() < 1.0 / max(n_points, 1):
+                f_idx = int(np.clip(round(mutant[b+1]), 0, num_features - 1))
+                bud = self.epsilon * ranges[f_idx]
+                x = float(np.clip((mutant[b+2] + bud) / (2 * bud + 1e-12), 0.0, 1.0))
                 u = np.random.random()
-                if u <= 0.5:
-                    delta = (2 * u) ** (1.0 / (self.eta_m + 1.0)) - 1.0
+                if u < 0.5:
+                    dq = (2 * u) ** (1.0 / (self.eta_m + 1.0)) - 1.0
                 else:
-                    delta = 1.0 - (2.0 * (1.0 - u)) ** (1.0 / (self.eta_m + 1.0))
-                mutant[base + 2] += delta
+                    dq = 1.0 - (2.0 * (1.0 - u)) ** (1.0 / (self.eta_m + 1.0))
+                mutant[b+2] = float(np.clip(x + dq, 0.0, 1.0)) * 2 * bud - bud
 
-        # 合法性修正：t/f 取整截断，p 按动态预算截断
-        for k in range(self.n):
-            mutant[3 * k] = float(np.clip(round(mutant[3 * k]), 0, seq_len - 1))
-            mutant[3 * k + 1] = float(np.clip(round(mutant[3 * k + 1]), 0, num_features - 1))
-            f_idx = int(mutant[3 * k + 1])
-            budget = self.epsilon * ranges[f_idx]
-            mutant[3 * k + 2] = np.clip(mutant[3 * k + 2], -budget, budget)
+        # ---------- 2) 插入变异：n+1（不超过 n_max）----------
+        if np.random.random() < self.insert_prob and n_points < self.n_max:
+            existing = {(int(round(mutant[3*k])), int(round(mutant[3*k+1]))) for k in range(n_points)}
+            new_point = np.array(self._random_new_point(seq_len, allowed_features, ranges, existing)[0],
+                                 dtype=float)
+            mutant = np.concatenate([mutant, new_point])
+            n_points += 1
+        # ---------- 3) 删除变异：n-1（不低于 n_min）----------
+        elif np.random.random() < self.delete_prob and n_points > self.n_min:
+            drop = int(np.random.randint(0, n_points))
+            kept = [mutant[3*k:3*k+3] for k in range(n_points) if k != drop]
+            mutant = np.concatenate(kept).astype(float)
+            n_points -= 1
 
+        # ---------- 统一合法性修复 ----------
+        mutant = self._repair_unique(mutant, seq_len, allowed_features)
+        # 变长编码额外保障：点级变异挪动 t/f 后可能触发去重合并，使 n 跌破 n_min，此处统一拉回区间
+        mutant = self._enforce_length_bounds(mutant, seq_len, num_features, ranges, allowed_features)
+        mutant = self._clip_tf_budget(mutant, seq_len, num_features, ranges)
         return mutant
 
     def attack(self, X, y, seed=None):
         """
-        对单个样本执行 NSGA-II 双目标攻击
+        对单个样本执行 NSGA-II 双目标变长攻击（L0 作为约束）
 
         返回值:
-            X_adv: 攻击效果最优的对抗样本（RSE 最大）
+            X_adv: 按 select_mode 选出的对抗样本（'knee'=折中膝点，'max_rse'=攻击上界端点）
             best_mse: 对应的攻击后 MSE
-            pareto_solutions: 最终第一 Pareto 前沿解集
-            pareto_objectives: 最终前沿对应的目标值矩阵，shape=(k, 2)
-            generation_pareto: 每一代第一 Pareto 前沿记录列表
+            pareto_solutions: 最终第一 Pareto 前沿解集（【变长编码】list of 一维向量，长度可各不相同）
+            pareto_objectives: 最终前沿对应的目标值矩阵，shape=(k, 2)【双目标 [L2, -RSE]】
+            generation_pareto: 每一代第一 Pareto 前沿记录列表，
+                               每条 shape=(m, 3) = [L2, -RSE, n_actual(附带属性，不参与支配)]
         """
         if seed is not None:
             np.random.seed(seed)
@@ -1657,34 +1390,36 @@ class NVITA_NSGA2:
 
         # 没有允许扰动的特征，直接返回原始输入
         if len(allowed_features) == 0:
-            empty_pareto = np.array([]).reshape(0, 2)
-            return X, 0.0, np.array([]), empty_pareto, []
+            empty_pareto = np.array([]).reshape(0, 2)   # 双目标：空前沿列数为 2
+            return X, 0.0, [], empty_pareto, []
 
-        # ========== 1. 种群初始化 ==========
-        population = np.array([
+        # ========== 1. 种群初始化（【变长编码】每个个体的 n 独立随机采样，种群用 list 承载）==========
+        population = [
             self._init_individual(seq_len, num_features, allowed_features, ranges)
             for _ in range(self.pop_size)
-        ])
+        ]
 
-        # ========== 2. 初始种群评估双目标 ==========
-        objectives = np.zeros((self.pop_size, 2))
+        # ========== 2. 初始种群评估双目标 + 约束变量 ==========
+        objectives = np.zeros((self.pop_size, 2))          # 双目标 [L2, -RSE]，形状恒为 (N, 2)
+        n_actual_pop = np.zeros(self.pop_size)             # 约束变量 n_actual（不进入 objectives）
         for i in range(self.pop_size):
-            objectives[i] = self._evaluate_objectives(x_np, y_val, population[i], device)
+            objectives[i], n_actual_pop[i] = self._evaluate_objectives(x_np, y_val, population[i], device)
 
         # ========== 3. 每代 Pareto 前沿记录 ==========
         generation_pareto = []
 
         # ========== 4. NSGA-II 主循环 ==========
         for gen in range(self.maxiter):
-            # 非支配排序
-            fronts, rank = self._fast_non_dominated_sort(objectives)
+            # 非支配排序（Deb 约束支配：可行优先 → 二维目标支配 → 违约度比较）
+            cv_pop = self._constraint_violation(n_actual_pop)
+            fronts, rank = self._fast_non_dominated_sort(objectives, cv_pop)
 
-            # 记录当前代的第一 Pareto 前沿
+            # 记录当前代的第一 Pareto 前沿（前两列为双目标，第三列携带 n_actual 附带属性，仅供下游统计/着色）
             if len(fronts) > 0:
-                gen_front = objectives[fronts[0]].copy()
-                generation_pareto.append(gen_front)
+                gen_front = np.column_stack([objectives[fronts[0]], n_actual_pop[fronts[0]]])
+                generation_pareto.append(gen_front.copy())
 
-            # 拥挤距离
+            # 拥挤距离（按 2 个目标的值域归一化，避免量级差异导致选择失衡；n_actual 不参与）
             crowding = self._crowding_distance(objectives, fronts)
 
             # 二元锦标赛选择
@@ -1692,34 +1427,37 @@ class NVITA_NSGA2:
                 population, objectives, rank, crowding, self.pop_size
             )
 
-            # 生成子代：USX 集合交叉 + 分维度变异
+            # 生成子代：变长单点交叉 + 三类变异（末尾均含合法性修正、位置去重与长度修复）
             offspring = []
             for i in range(0, self.pop_size, 2):
                 p1 = mating_pool[i]
                 p2 = mating_pool[min(i + 1, self.pop_size - 1)]
-                c1, c2 = self._usx_crossover(p1, p2, seq_len, num_features, ranges)
-                c1 = self._polynomial_mutation(c1, seq_len, num_features, ranges, allowed_features)
-                c2 = self._polynomial_mutation(c2, seq_len, num_features, ranges, allowed_features)
+                c1, c2 = self._crossover(p1, p2, seq_len, num_features, ranges, allowed_features)
+                c1 = self._mutation(c1, seq_len, num_features, ranges, allowed_features)
+                c2 = self._mutation(c2, seq_len, num_features, ranges, allowed_features)
                 offspring.append(c1)
                 offspring.append(c2)
-            offspring = np.array(offspring[:self.pop_size])
+            offspring = offspring[:self.pop_size]   # 【变长编码】保持 list 容器，不堆叠成矩形矩阵
 
-            # 评估子代双目标
-            offspring_obj = np.zeros((self.pop_size, 2))
-            for i in range(self.pop_size):
-                offspring_obj[i] = self._evaluate_objectives(
+            # 评估子代双目标 + 约束变量
+            offspring_obj = np.zeros((len(offspring), 2))
+            n_actual_off = np.zeros(len(offspring))
+            for i in range(len(offspring)):
+                offspring_obj[i], n_actual_off[i] = self._evaluate_objectives(
                     x_np, y_val, offspring[i], device
                 )
 
-            # μ+λ 环境选择：合并父代和子代
-            combined_pop = np.vstack([population, offspring])
+            # μ+λ 环境选择：合并父代和子代（变长个体无法 vstack，改用 list 拼接）
+            combined_pop = population + offspring
             combined_obj = np.vstack([objectives, offspring_obj])
+            combined_n_actual = np.concatenate([n_actual_pop, n_actual_off])
 
-            # 对合并后的种群做非支配排序 + 拥挤距离
-            fronts_combined, rank_combined = self._fast_non_dominated_sort(combined_obj)
+            # 对合并后的种群做约束非支配排序 + 拥挤距离（均只按 2 个目标）
+            cv_combined = self._constraint_violation(combined_n_actual)
+            fronts_combined, rank_combined = self._fast_non_dominated_sort(combined_obj, cv_combined)
             crowding_combined = self._crowding_distance(combined_obj, fronts_combined)
 
-            # 按「非支配层级升序 → 同层拥挤距离降序」选择前 pop_size 个
+            # 按「约束可行（已由约束支配编码进 rank）→ 非支配层级升序 → 同层拥挤距离降序」选择前 pop_size 个
             selected_indices = []
             for front in fronts_combined:
                 if len(selected_indices) + len(front) <= self.pop_size:
@@ -1732,31 +1470,75 @@ class NVITA_NSGA2:
                     selected_indices.extend(sorted_front[:remaining].tolist())
                     break
 
-            population = combined_pop[selected_indices]
+            population = [combined_pop[i] for i in selected_indices]
             objectives = combined_obj[selected_indices]
+            n_actual_pop = combined_n_actual[selected_indices]
 
-        # 记录最后一代的第一 Pareto 前沿
-        final_fronts, _ = self._fast_non_dominated_sort(objectives)
+        # 记录最后一代的第一 Pareto 前沿（同样携带 n_actual 附带属性）
+        cv_pop = self._constraint_violation(n_actual_pop)
+        final_fronts, _ = self._fast_non_dominated_sort(objectives, cv_pop)
         if len(final_fronts) > 0:
-            generation_pareto.append(objectives[final_fronts[0]].copy())
+            generation_pareto.append(
+                np.column_stack([objectives[final_fronts[0]], n_actual_pop[final_fronts[0]]]).copy())
 
-        # ========== 5. 选择攻击效果最优的解（取 RSE 最大端点作为攻击强度上界）==========
-        # 注意：当前选的是 Pareto 前沿上 RSE 最大（即 1/RSE 最小）的端点，完全忽略 L2 隐蔽性。
-        # 这代表"攻击强度上界"而非"强度-隐蔽性折中"。论文中需明确说明此选择策略，
-        # 或改为膝点选择（knee point）以体现折中叙事。
-        best_idx = np.argmin(objectives[:, 1])
-        best_ind = population[best_idx].copy()
+        # ========== 5. 选择最终解（按 select_mode 决定折中膝点或攻击上界端点）==========
+        # 'knee'（默认）：从最终第一前沿的可行解（cv=0）中选择二维归一化后距理想点最近的折中解，
+        #   【双目标】obj[1] = -RSE 为负值，归一化改为「按候选集每维最大绝对值缩放」，
+        #   把 [L2, -RSE] 映射到 (0,1] 后计算距理想点 (0,0) 的欧氏距离，兼顾攻击效果与隐蔽性；
+        #   稀疏性不再作为目标维，而是在距离打平时作为 tie-break（等优更稀疏）。
+        #   有效性下界 knee_min_rse：仅 RSE>=knee_min_rse（即 -RSE<=-knee_min_rse）的前沿点参与膝点评选；
+        #   弱前沿上若无有效点，回退到可行且攻击最强端点，保证结果不是近零扰动
+        # 'max_rse'：取 RSE 最大端点（攻击强度上界，完全忽略 L2 隐蔽性与稀疏性），保留用于消融对比
+        if self.select_mode == 'knee' and len(final_fronts) > 0:
+            front_idx = np.array(final_fronts[0])
+            front_obj = objectives[front_idx]
+            front_n = n_actual_pop[front_idx]
+            front_cv = self._constraint_violation(front_n)
+            feasible_mask = front_cv <= 0.0            # 膝点只在可行解（n_actual ∈ [n_min, n_max]）中评选
+            if feasible_mask.any():
+                fea_idx = front_idx[feasible_mask]
+                fea_obj = front_obj[feasible_mask]
+                cand_mask = fea_obj[:, 1] <= -self.knee_min_rse   # -RSE <= -knee_min_rse 即 RSE >= knee_min_rse
+                if cand_mask.any():
+                    cand_idx = fea_idx[cand_mask]
+                    cand_obj = fea_obj[cand_mask]
+                    cand_n = front_n[feasible_mask][cand_mask]
+                else:
+                    end_pos = int(np.argmin(fea_obj[:, 1]))       # 弱前沿回退：可行解中攻击最强端点
+                    cand_idx = fea_idx[[end_pos]]
+                    cand_obj = fea_obj[[end_pos]]
+                    cand_n = front_n[feasible_mask][[end_pos]]
+            else:
+                # 极端回退：前沿内无可行解时取违约度最小且攻击最强者（正常配置下不会触发）
+                order = np.lexsort((front_obj[:, 1], front_cv))
+                cand_idx = front_idx[order[:1]]
+                cand_obj = front_obj[order[:1]]
+                cand_n = front_n[order[:1]]
+            # 【二维归一化】按候选集每维最大绝对值缩放到 (0,1]（-RSE 恒为负，|−RSE|/max|−RSE| ∈ (0,1]）
+            denom = np.max(np.abs(cand_obj), axis=0)
+            denom[denom < 1e-12] = 1.0                 # 防除零（候选集在该维全为 0 时）
+            normed = np.abs(cand_obj) / denom
+            dist = np.sqrt(np.sum(normed ** 2, axis=1))   # 距理想点 (0,0) 欧氏距离
+            # tie-break（容差 1e-8）：距离相等时取 n_actual 更小者（等优更稀疏），仍相等取 L2 更小者
+            ties = np.where(dist <= dist.min() + 1e-8)[0]
+            tie_n = cand_n[ties]
+            min_n_pos = np.where(tie_n <= tie_n.min() + 1e-8)[0]
+            best_pos = ties[min_n_pos[int(np.argmin(cand_obj[ties][min_n_pos, 0]))]]
+            best_idx = cand_idx[best_pos]
+        else:
+            best_idx = np.argmin(objectives[:, 1])  # 上界模式/回退：-RSE 最小即 RSE 最大
+        best_ind = population[int(best_idx)].copy()
         x_adv_final = self._apply_perturbation(x_np, best_ind)
         with torch.no_grad():
             pred_best = self.model(torch.FloatTensor(x_adv_final).to(device)).item()
         best_mse = (pred_best - y_val) ** 2
 
-        # 最终第一 Pareto 前沿
+        # 最终第一 Pareto 前沿（【变长编码】解集用 list 承载；目标值矩阵恒为 (k, 2)）
         if len(final_fronts) > 0:
-            pareto_solutions = population[final_fronts[0]].copy()
+            pareto_solutions = [population[i].copy() for i in final_fronts[0]]
             pareto_objectives = objectives[final_fronts[0]].copy()
         else:
-            pareto_solutions = np.array([])
+            pareto_solutions = []
             pareto_objectives = np.array([]).reshape(0, 2)
 
         return (
@@ -1768,39 +1550,51 @@ class NVITA_NSGA2:
         )
 
 
+
 # =============================================================================
-# SECTION 8: NSGA-II 批量攻击与 Pareto 进化可视化
+# SECTION 7: NSGA-II 批量攻击与 Pareto 进化可视化
 # =============================================================================
 
 
-def extract_first_front_2d(objs):
-    """提取二维最小化问题 (obj0, obj1) 的第一 Pareto 前沿（O(N log N) 排序扫描法）
-    汇总数千个样本的最终前沿时，纯 Python 双循环的 _fast_non_dominated_sort
-    复杂度过高；二维情形可用「按 obj0 升序扫描 + 保留 obj1 严格递减」精确求解
+def extract_first_front(objs):
+    """【双目标适配】提取二维最小化问题的第一 Pareto 前沿（O(N log N) 扫描法）
+    objs 前两列为双目标 [L2, -RSE]；若带第 3 列（n_actual 附带属性），
+    该列不参与支配判定，仅随前沿点一并携带返回。
+    算法：按 obj0 升序排序后扫描，保留 obj1 严格优于当前最小值的点。
     """
     if objs.shape[0] == 0:
-        return np.empty((0, 2))
-    order = np.lexsort((objs[:, 1], objs[:, 0]))
-    front_idx = []
-    best_obj1 = np.inf
-    for idx in order:
-        if objs[idx, 1] < best_obj1:
-            front_idx.append(idx)
-            best_obj1 = objs[idx, 1]
-    return objs[np.array(front_idx, dtype=int)]
+        n_col = objs.shape[1] if objs.ndim == 2 else 2
+        return np.empty((0, n_col))
+    o2 = objs[:, :2]
+    order = np.argsort(o2[:, 0], kind='stable')
+    keep = []
+    best_y = np.inf
+    for i in order:
+        if o2[i, 1] < best_y:            # obj1 严格更优才保留（obj0 相等时只留首个）
+            keep.append(i)
+            best_y = o2[i, 1]
+    if not keep:
+        return np.empty((0, objs.shape[1]))
+    return objs[np.array(keep, dtype=int)]
 
 
-def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n, maxiter, pop_size, device,
+def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxiter, pop_size, device,
                                 feature_ranges, feature_constraint=None, perturb_features=None,
-                                print_info=False):
+                                print_info=False, select_mode='knee', knee_min_rse=2.0,
+                                insert_prob=0.1, delete_prob=0.1):
     """
-    批量运行 NSGA-II 双目标攻击
+    批量运行 NSGA-II 双目标变长攻击（L0 作为约束）
 
     对每个测试样本运行 NVITA_NSGA2 攻击，收集对抗样本、攻击指标和 Pareto 进化数据。
+    【变长编码】原固定参数 n 拆分为 n_min / n_max，扰动点数在区间内逐个体动态变化
+    【双目标】目标向量为 (L2 范数, -RSE)，形状恒为 (N, 2)；
+             n_actual 为约束变量（要求 ∈ [n_min, n_max]），随前沿记录作为附带属性携带
+    select_mode: 最终解选择策略（'knee'=折中膝点，默认 / 'max_rse'=攻击上界端点）
+    knee_min_rse: 膝点有效性下界（仅 RSE>=该值的前沿点可作膝点候选）
 
     返回:
         X_adv_total: 所有对抗样本拼接结果
-        metrics: 汇总指标字典
+        metrics: 汇总指标字典（含双目标与约束变量 n_actual 的均值统计）
         all_generation_pareto: 每个样本的 Pareto 进化记录列表
     """
     model.to(device)
@@ -1810,14 +1604,21 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n, maxiter, pop_siz
     all_clean_mse = []
     all_adv_mse = []
     all_l2_norms = []
+    all_sel_l2 = []        # 选中解的目标1：L2 范数
+    all_sel_rse = []       # 选中解的目标2还原量：RSE = -obj[1]
+    all_sel_n_actual = []  # 选中解的约束变量：实际扰动点数（L0，要求 ∈ [n_min, n_max]）
     all_generation_pareto = []
 
     attacker = NVITA_NSGA2(
-        n=n, epsilon=beta, model=model,
+        n_min=n_min, n_max=n_max, epsilon=beta, model=model,   # 变长编码：n_min / n_max
         feature_ranges=feature_ranges,
         maxiter=maxiter, pop_size=pop_size,
         feature_constraint=feature_constraint,
-        perturb_features=perturb_features
+        perturb_features=perturb_features,
+        select_mode=select_mode,
+        knee_min_rse=knee_min_rse,
+        insert_prob=insert_prob,
+        delete_prob=delete_prob
     )
 
     total = X_test.shape[0]
@@ -1846,11 +1647,19 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n, maxiter, pop_siz
             avg_l2 = 0.0
         all_l2_norms.append(avg_l2)
 
-        # 保存 Pareto 进化数据
+        # 选中解的双目标与约束变量实测值（从对抗样本与原始样本的差值反推，口径与目标函数一致）
+        diff = (X_adv - X_current).detach().cpu().numpy().reshape(-1)
+        all_sel_l2.append(float(np.sqrt(np.sum(diff ** 2))))
+        all_sel_n_actual.append(int(np.count_nonzero(np.abs(diff) > 1e-12)))
+        all_sel_rse.append(float(np.sqrt(best_mse / clean_mse)) if clean_mse > 1e-10 else 0.0)
+
+        # 保存 Pareto 进化数据（final_pareto_solutions 与 final_pareto_obj 同序，
+        # 供高级分析模块解码全局前沿解的 (t,f) 扰动位置，用于位置频次热力图）
         all_generation_pareto.append({
             'sample_idx': test_ind,
             'generation_pareto': generation_pareto,
             'final_pareto_obj': pareto_objectives,
+            'final_pareto_solutions': pareto_solutions,
         })
 
         if print_info and (test_ind + 1) % 20 == 0:
@@ -1860,67 +1669,125 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n, maxiter, pop_siz
         'mean_clean_mse': float(np.mean(all_clean_mse)),
         'mean_adv_mse': float(np.mean(all_adv_mse)),
         'mean_l2_norm': float(np.mean(all_l2_norms)),
+        # ====== 双目标选中解统计 + 约束变量 n_actual 统计 ======
+        'mean_sel_l2_norm': float(np.mean(all_sel_l2)) if all_sel_l2 else 0.0,              # 目标1
+        'mean_sel_rse': float(np.mean(all_sel_rse)) if all_sel_rse else 0.0,                # 目标2（还原为 RSE）
+        'mean_sel_n_actual': float(np.mean(all_sel_n_actual)) if all_sel_n_actual else 0.0,  # 约束变量（L0）
+        # ====== 【L0 约束】约束满足度指标（三目标版无此项，L0 改为约束后新增并持久化）======
+        # 口径与 NVITA_NSGA2._constraint_violation 完全一致：n_min <= n_actual <= n_max 双边界同时校验
+        'constraint_feasible_cnt': int(np.sum((np.asarray(all_sel_n_actual) >= n_min)
+                                             & (np.asarray(all_sel_n_actual) <= n_max))) if all_sel_n_actual else 0,
+        'constraint_feasible_rate': float(np.mean((np.asarray(all_sel_n_actual) >= n_min)
+                                                 & (np.asarray(all_sel_n_actual) <= n_max))) if all_sel_n_actual else 0.0,
         'clean_mses': all_clean_mse,
         'adv_mses': all_adv_mse,
         'l2_norms': all_l2_norms,
+        'sel_l2_norms': all_sel_l2,
+        'sel_rses': all_sel_rse,
+        'sel_n_actuals': all_sel_n_actual,
         'total_samples': total,
     }
 
-    # 汇总所有样本的最终前沿，计算全局最终 Pareto 前沿（跨样本非支配筛选）
-    final_objs_list = [
-        rec['final_pareto_obj'] for rec in all_generation_pareto
-        if isinstance(rec['final_pareto_obj'], np.ndarray) and rec['final_pareto_obj'].shape[0] > 0
-    ]
+    # 汇总所有样本的最终前沿，计算全局最终 Pareto 前沿（跨样本二维非支配筛选，O(N log N)）
+    # 记录格式 = [L2, -RSE, n_actual(附带属性)]：支配只按前两列，n_actual 随前沿点一并携带
+    final_objs_list = []
+    for rec in all_generation_pareto:
+        obj = rec['final_pareto_obj']
+        if not (isinstance(obj, np.ndarray) and obj.shape[0] > 0):
+            continue
+        gp = rec.get('generation_pareto') or []
+        if gp and gp[-1].shape[0] == obj.shape[0] and gp[-1].shape[1] >= 3:
+            n_attr = gp[-1][:, 2]        # 末代前沿记录与 final_pareto_obj 同序，直接取其 n_actual 列
+        else:
+            # 回退：从变长解编码反解点数（口径与记录列一致，仅兼容性兜底）
+            n_attr = np.array([len(s) // 3 for s in rec.get('final_pareto_solutions', [])],
+                              dtype=float)
+            if n_attr.shape[0] != obj.shape[0]:
+                n_attr = np.full(obj.shape[0], np.nan)
+        final_objs_list.append(np.column_stack([obj, n_attr]))
     if final_objs_list:
         combined_objs = np.vstack(final_objs_list)
-        metrics['global_final_pareto_obj'] = extract_first_front_2d(combined_objs)
+        metrics['global_final_pareto_obj'] = extract_first_front(combined_objs)
     else:
-        metrics['global_final_pareto_obj'] = np.empty((0, 2))
+        metrics['global_final_pareto_obj'] = np.empty((0, 3))
 
     return X_adv_total, metrics, all_generation_pareto
 
 
-def plot_pareto_evolution(generation_pareto, n_max, pop_size, save_path=None):
+def plot_pareto_evolution(generation_pareto, n_min, n_max, pop_size, save_path=None):
     """
-    绘制 Pareto 前沿进化路线散点图
-    横轴：扰动 L2 范数（越小越左，扰动越隐蔽）
-    纵轴：RSE（相对平方误差，越大攻击效果越强）
-    不同代数使用颜色渐变区分（从浅蓝到深红，代数越晚颜色越深）
+    绘制双目标 Pareto 前沿进化二维散点图（L0 作为约束，n in [n_min, n_max]）
+    横轴：扰动 L2 范数（目标1，越小越隐蔽）
+    纵轴：-RSE（目标2，越小代表攻击效果越强）
+    点颜色：实际扰动点数 n_actual（约束变量，颜色条标注，体现稀疏度从前沿涌现）
+    代数：透明度随代数递增区分（越晚越实），最后一代加黑色描边突出
+    记录格式：generation_pareto 每条 shape=(m,3) = [L2, -RSE, n_actual(附带属性)]
     """
     n_generations = len(generation_pareto)
     if n_generations == 0:
         print("警告: 无 Pareto 进化数据可绘图")
         return
 
-    plt.figure(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(11, 8))
 
-    # 颜色映射：从浅蓝到深红
-    colors = plt.cm.RdYlBu_r(np.linspace(0.2, 0.9, n_generations))
-
+    # 收集所有代的点（颜色统一映射 n_actual，透明度编码代数）
+    all_l2, all_nrse, all_n, all_alpha, last_gen_mask = [], [], [], [], []
     for gen_idx, front_data in enumerate(generation_pareto):
         if front_data.shape[0] == 0:
             continue
-        l2_vals = front_data[:, 0]  # L2 范数
-        inv_rse_vals = front_data[:, 1]  # 1/RSE（已经是倒数形式）
-        plt.scatter(l2_vals, inv_rse_vals, c=[colors[gen_idx]], s=20,
-                    alpha=0.7)
+        l2_vals = front_data[:, 0]       # 目标1: L2 范数
+        neg_rse_vals = front_data[:, 1]  # 目标2: -RSE（已是取负号后的最小化形式）
+        # n_actual: 约束变量（记录第 3 列附带属性，不参与支配）
+        if front_data.shape[1] >= 3:
+            n_actual_vals = front_data[:, 2]
+        else:
+            n_actual_vals = np.full(front_data.shape[0], np.nan)
+        is_last = (gen_idx == n_generations - 1)
+        alpha = 0.35 + 0.65 * (gen_idx / max(n_generations - 1, 1))   # 代数越晚越实
+        all_l2.append(l2_vals)
+        all_nrse.append(neg_rse_vals)
+        all_n.append(n_actual_vals)
+        all_alpha.append(np.full(front_data.shape[0], alpha))
+        last_gen_mask.append(np.full(front_data.shape[0], is_last))
+    if not all_l2:
+        print("警告: Pareto 进化数据全部为空，跳过绘图")
+        plt.close(fig)
+        return
+    xs = np.concatenate(all_l2)
+    ys = np.concatenate(all_nrse)
+    cs = np.concatenate(all_n)
+    alphas = np.concatenate(all_alpha)
+    lasts = np.concatenate(last_gen_mask)
 
-    # 生成图例（选取部分代数显示，避免图例过长）
-    step = max(1, n_generations // 6)
-    for gen_idx in range(0, n_generations, step):
-        plt.scatter([], [], c=[colors[gen_idx]], s=40, alpha=0.8,
-                    label=f'Gen {gen_idx}')
-    if n_generations - 1 not in range(0, n_generations, step):
-        plt.scatter([], [], c=[colors[n_generations - 1]], s=40, alpha=0.8,
-                    label=f'Gen {n_generations - 1}')
+    # 颜色统一映射 n_actual（viridis），逐点 alpha 写入 RGBA 第 4 通道（matplotlib 的
+    # scatter alpha 参数只接受标量，透明度随代数递增须通过 RGBA 实现）
+    c_arr = np.asarray(cs, dtype=float)
+    c_valid = c_arr[np.isfinite(c_arr)]
+    vmin = c_valid.min() if c_valid.size else 0.0
+    vmax = c_valid.max() if c_valid.size else 1.0
+    norm = plt.Normalize(vmin=vmin, vmax=max(vmax, vmin + 1e-9))
+    rgba = plt.cm.viridis(norm(np.nan_to_num(c_arr, nan=vmin)))
+    rgba[:, 3] = alphas
 
-    plt.xlabel('Perturbation L2 Norm', fontsize=13)
-    plt.ylabel('1/RSE (Inverse RSE)', fontsize=13)
-    plt.title(f'Pareto Front Evolution (n_max={n_max}, pop_size={pop_size})',
-              fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    plt.legend(title='Generation', loc='best', fontsize=9)
-    plt.tight_layout()
+    sc = ax.scatter(xs[~lasts], ys[~lasts], c=rgba[~lasts], s=45, edgecolors='none')
+    ax.scatter(xs[lasts], ys[lasts], c=rgba[lasts], s=60,
+               edgecolors='k', linewidths=0.6,
+               label=f'Final gen ({n_generations - 1})')
+
+    sm = plt.cm.ScalarMappable(cmap='viridis', norm=norm)
+    sm.set_array([])
+    cb = fig.colorbar(sm, ax=ax)
+    cb.set_label('n_actual (constraint variable, sparsity)', fontsize=12)
+
+    ax.set_xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
+    ax.set_ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
+    ax.set_title(f'Bi-objective Pareto Front Evolution (L0 as constraint, n in [{n_min},{n_max}], '
+                 f'pop_size={pop_size})', fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(title='Generation', loc='upper right', fontsize=9)
+    ax.text(0.02, -0.13, '点颜色 = n_actual（约束变量，稀疏度从前沿涌现）；透明度随代数递增（越晚越实），'
+            '最后一代加黑色描边',
+            transform=ax.transAxes, fontsize=9, color='dimgray')
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -1929,151 +1796,383 @@ def plot_pareto_evolution(generation_pareto, n_max, pop_size, save_path=None):
     plt.show()
 
 
-def plot_pareto_front_with_lba(final_pareto_obj, lba_points, save_path=None,
-                               title='Final Pareto Front & LBA Learned Attack Mode'):
+# =============================================================================
+# SECTION 7.5: 攻击收敛性与前沿结构高级分析
+# 包含：二维超体积(HV)逐代收敛曲线 / 双目标均值与最优值进化曲线（n_actual 作为约束变量统计）/
+#       每代前沿解数量曲线 / 全局最终前沿主 Pareto 图（按 n_actual 着色）/
+#       RSE中位典型样本攻击效果对比 / 扰动位置频次热力图
+# 全部基于攻击结果数据做后处理（不改动攻击核心逻辑），统计数据持久化到 analysis_data.pkl
+# =============================================================================
+
+
+def extract_first_front_indices(objs):
+    """提取二维最小化问题第一 Pareto 前沿的行索引（O(N log N) 扫描法）
+    与 extract_first_front 判定口径完全一致，但保留行索引，
+    便于从全局前沿目标值回溯对应样本的解编码（决策变量）。
+    objs 前两列为双目标 [L2, -RSE]；第 3 列（若有）为 n_actual 附带属性，不参与支配。
     """
-    在最终全局 Pareto 前沿上标注 LBA 学到的攻击模式坐标与性能
-    final_pareto_obj: (k,2) 教师攻击(NSGA-II nVITA)全局最终前沿 [l2, 1/rse]
-    lba_points: [{'delta','l2','rse',...}, ...] 各 delta 下 LBA 攻击的坐标与性能
+    if objs.shape[0] == 0:
+        return np.array([], dtype=int)
+    o2 = objs[:, :2]
+    order = np.argsort(o2[:, 0], kind='stable')
+    keep = []
+    best_y = np.inf
+    for i in order:
+        if o2[i, 1] < best_y:
+            keep.append(int(i))
+            best_y = o2[i, 1]
+    return np.array(keep, dtype=int)
+
+
+def hypervolume_2d(points_2d, ref_2d):
+    """二维超体积精确计算（最小化目标，ref_2d 为两目标上界参考点）
+    扫描法：按目标1升序遍历，累加 (区间宽 × 目标2当前最优宽度)。
     """
-    plt.figure(figsize=(11, 8))
+    pts = points_2d[np.all(points_2d < ref_2d, axis=1)]   # 任一维达到/超过参考点的点不贡献体积
+    if pts.shape[0] == 0:
+        return 0.0
+    order = np.argsort(pts[:, 0])
+    pts = pts[order]
+    area = 0.0
+    prev_x = pts[0, 0]
+    best_y = pts[0, 1]
+    for i in range(1, pts.shape[0]):
+        area += (pts[i, 0] - prev_x) * (ref_2d[1] - best_y)
+        if pts[i, 1] < best_y:
+            best_y = pts[i, 1]
+        prev_x = pts[i, 0]
+    area += (ref_2d[0] - prev_x) * (ref_2d[1] - best_y)
+    return float(area)
 
-    has_front = isinstance(final_pareto_obj, np.ndarray) and final_pareto_obj.shape[0] > 0
-    if has_front:
-        l2_vals = final_pareto_obj[:, 0]
-        inv_rse_vals = final_pareto_obj[:, 1]  # 已经是 1/RSE
-        order = np.argsort(l2_vals)
-        plt.plot(l2_vals[order], inv_rse_vals[order], c='tab:blue', lw=1.0, alpha=0.45, zorder=1)
-        plt.scatter(l2_vals, inv_rse_vals, c='tab:blue', s=42, alpha=0.75, zorder=2,
-                    label='NSGA-II nVITA final Pareto front')
 
-    if lba_points:
-        lba_l2 = [p['l2'] for p in lba_points]
-        lba_inv_rse = [1.0 / p['rse'] for p in lba_points]  # 原始 RSE 转 1/RSE
-        plt.scatter(lba_l2, lba_inv_rse, c='red', marker='*', s=260,
-                    edgecolors='darkred', linewidths=0.8, zorder=3,
-                    label='LBA learned attack mode')
-        for p in lba_points:
-            inv_rse = 1.0 / p['rse']
-            plt.annotate(
-                f"δ={p['delta']:.2f}\nL2={p['l2']:.4f}\n1/RSE={inv_rse:.3f}",
-                (p['l2'], inv_rse), textcoords='offset points', xytext=(10, 8),
-                fontsize=8,
-                bbox=dict(boxstyle='round,pad=0.25', fc='mistyrose', ec='lightcoral', alpha=0.8)
-            )
+def compute_generation_metrics(all_generation_pareto):
+    """从攻击记录后处理每代收敛指标（二维超体积 / 双目标均值与最优值 / 前沿解数量 /
+    约束变量 n_actual 每代统计）
 
-    plt.xlabel('Perturbation L2 Norm', fontsize=13)
-    plt.ylabel('1/RSE (Inverse RSE)', fontsize=13)
-    plt.title(title, fontsize=14, fontweight='bold')
+    【双目标改造】删除三目标版遗留的 n_max 形参：原三目标参考点第三维取 n_max，
+    改为「L0 作约束」后参考点只剩 [L2, -RSE] 两维，n_max 在本函数内已无用途。
+
+    统计口径：逐样本计算后跨样本平均（不同样本代数不齐时以 NaN 对齐），
+    参考点跨全部样本统一取值，保证逐样本 HV 可比、平均曲线有意义。
+    参考点（nadir）：obj1/obj2 取全部样本全部代的最大值向外扩张 10%（max + 0.1×|max|，
+    兼容 -RSE 负值；仅二维 [L2, -RSE]）。
+    记录格式：generation_pareto 每条 shape=(m,3) = [L2, -RSE, n_actual(附带属性)]，
+    HV 与支配统计只用前两列，第三列仅作约束变量统计。
+
+    返回 None（无有效数据）或字典：
+        ref_point:         统一参考点 shape=(2,)
+        hv_mean / hv_std:  每代二维 HV 的跨样本均值 / 标准差（曲线数据）
+        hv_per_sample:     逐样本每代 HV 明细 shape=(n_samples, n_generations)
+        obj1_mean / obj1_best / obj2_mean / obj2_best: 双目标每代均值 / 最小值曲线
+        n_actual_mean / n_actual_best: 每代前沿 n_actual 均值 / 最小值（constraint variable，非目标）
+        obj_mean_per_sample / obj_best_per_sample: 双目标逐样本明细 shape=(n,gen,2)
+        front_size_mean:   每代第一前沿解数量的跨样本均值
+        n_samples / n_generations: 参与统计的样本数与代数
+    """
+    valid_recs = [rec for rec in all_generation_pareto
+                  if len(rec.get('generation_pareto', [])) > 0]
+    if not valid_recs:
+        return None
+    n_samp = len(valid_recs)
+    n_gen = max(len(rec['generation_pareto']) for rec in valid_recs)
+
+    # 统一参考点：obj1/obj2 取全部样本全部代的最大值向外扩张 10%（max + 0.1×|max|）。
+    # 注意不能用 max×1.1：obj2 = -RSE 恒为负，×1.1 会向 0 收缩导致参考点反被前沿支配、HV 恒为 0；
+    # max + 0.1×|max| 对正负值都保证参考点严格劣于所有前沿点（n_actual 不进入 HV）
+    all_pts = np.vstack([front for rec in valid_recs
+                         for front in rec['generation_pareto'] if front.shape[0] > 0])
+    ref_point = np.array([all_pts[:, 0].max() + 0.1 * abs(all_pts[:, 0].max()),
+                          all_pts[:, 1].max() + 0.1 * abs(all_pts[:, 1].max())])
+
+    # NaN 对齐的逐样本逐代统计矩阵（空前沿的代保持 NaN，汇总时用 nanmean 剔除）
+    hv_mat = np.full((n_samp, n_gen), np.nan)
+    obj_mean_mat = np.full((n_samp, n_gen, 2), np.nan)
+    obj_best_mat = np.full((n_samp, n_gen, 2), np.nan)
+    size_mat = np.full((n_samp, n_gen), np.nan)
+    n_act_mean_mat = np.full((n_samp, n_gen), np.nan)
+    n_act_best_mat = np.full((n_samp, n_gen), np.nan)
+    for s, rec in enumerate(valid_recs):
+        for g, front in enumerate(rec['generation_pareto']):
+            if front.shape[0] == 0:
+                continue
+            obj2d = front[:, :2]                       # 双目标 [L2, -RSE]
+            hv_mat[s, g] = hypervolume_2d(obj2d, ref_point)
+            obj_mean_mat[s, g, :] = obj2d.mean(axis=0)
+            obj_best_mat[s, g, :] = obj2d.min(axis=0)
+            size_mat[s, g] = front.shape[0]
+            if front.shape[1] >= 3:                    # n_actual 附带属性 → 约束变量统计（非目标）
+                n_act_mean_mat[s, g] = front[:, 2].mean()
+                n_act_best_mat[s, g] = front[:, 2].min()
+
+    generation_metrics = {
+        'ref_point': ref_point,
+        'hv_mean': np.nanmean(hv_mat, axis=0),
+        'hv_std': np.nanstd(hv_mat, axis=0),
+        'hv_per_sample': hv_mat,
+        'obj_mean_per_sample': obj_mean_mat,
+        'obj_best_per_sample': obj_best_mat,
+        'obj1_mean': np.nanmean(obj_mean_mat[:, :, 0], axis=0),
+        'obj1_best': np.nanmean(obj_best_mat[:, :, 0], axis=0),
+        'obj2_mean': np.nanmean(obj_mean_mat[:, :, 1], axis=0),
+        'obj2_best': np.nanmean(obj_best_mat[:, :, 1], axis=0),
+        'n_actual_mean': np.nanmean(n_act_mean_mat, axis=0),   # constraint variable（非目标）
+        'n_actual_best': np.nanmean(n_act_best_mat, axis=0),   # constraint variable（非目标）
+        'front_size_mean': np.nanmean(size_mat, axis=0),
+        'n_samples': n_samp,
+        'n_generations': n_gen,
+    }
+    return generation_metrics
+
+
+def plot_hv_convergence(generation_metrics, save_path=None):
+    """绘制超体积收敛曲线（横轴 = 进化代数，纵轴 = 跨样本平均 HV）"""
+    hv_mean = np.asarray(generation_metrics['hv_mean'])
+    gens = np.arange(len(hv_mean))
+    plt.figure(figsize=(10, 6))
+    plt.plot(gens, hv_mean, '-o', color='tab:blue', linewidth=2.5, markersize=5,
+             alpha=0.9, label='Mean Hypervolume')
+    plt.xlabel('Generation', fontsize=13)
+    plt.ylabel('Hypervolume Value', fontsize=13)
+    plt.title('Convergence of Hypervolume (Bi-objective: L2 vs -RSE)', fontsize=14, fontweight='bold')
     plt.grid(True, alpha=0.3)
-    plt.legend(loc='best', fontsize=10)
+    plt.legend(fontsize=11, loc='best')
     plt.tight_layout()
-
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  Pareto 前沿+LBA 攻击模式图已保存至: {save_path}")
+        print(f"  HV 收敛曲线已保存至: {save_path}")
     plt.show()
 
 
-def run_lba_attack(model, lba_model, X_test, Y_test, delta, n, device,
-                   feature_constraint=None, perturb_features=None, print_info=False,
-                   beta=0.1, feature_ranges=None):
+def plot_objective_evolution(generation_metrics, save_path=None):
+    """绘制双目标逐代均值/最优值曲线（上下排列 2 张子图，每图含 Mean 与 Best 两条曲线）
+    n_actual 不再是目标维（已改为约束变量），其每代均值以 n_actual_mean 键
+    保留在 generation_metrics 中供控制台打印/持久化，不再绘制目标子图。
     """
-    使用训练好的 LBA 模型执行批量攻击（对齐 LearningBased_Atk/exp.py::LBA_attack）
-    位置解码: ind_feature, ind_window = po // windows_cnt, po % windows_cnt
-    扰动应用: 回归头输出的是训练时除以 beta 归一化后的扰动值，这里先乘回 beta 还原为真实
-    尺度，再乘以 delta 缩放系数后加到输入上: X_adv += delta * (perturbations * beta)，
-    与官方一致不限幅、不截断
-    命中"无攻击"类(po == windows_cnt * features_cnt)时跳过该点
-    
-    delta: 扰动值缩放系数（原论文 δ，官方代码中名为 beta）
-    n: 选取的敏感点数量
-    feature_constraint: 限定扰动特征数量
-    perturb_features: 精确指定要扰动的特征索引
-    beta: nVITA 扰动预算系数，与 get_LBA_Dataset 中的归一化相对应，用于将回归头输出的
-           归一化扰动值还原为真实尺度（需与训练时传入 get_LBA_Dataset 的 beta 保持一致）
-    feature_ranges: 保留形参以兼容调用方，对齐官方后不再用于限幅
+    gens = np.arange(len(generation_metrics['obj1_mean']))
+    fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
+    specs = [
+        ('obj1_mean', 'obj1_best', 'tab:blue', 'Perturbation L2 Norm (obj1)\nsmaller = more imperceptible'),
+        ('obj2_mean', 'obj2_best', 'tab:orange', '-RSE (obj2)\nsmaller = stronger attack'),
+    ]
+    for ax, (mean_key, best_key, color, ylabel) in zip(axes, specs):
+        ax.plot(gens, generation_metrics[mean_key], '-', color=color, linewidth=2.2,
+                label='Mean')
+        ax.plot(gens, generation_metrics[best_key], '--', color=color, linewidth=2.0,
+                alpha=0.85, label='Best (min)')
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=10, loc='best')
+    axes[-1].set_xlabel('Generation', fontsize=13)
+    fig.suptitle('Evolution of Two Objectives (L0 as constraint)', fontsize=15, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  双目标进化曲线已保存至: {save_path}")
+    plt.show()
+
+
+def plot_pareto_count_evolution(generation_metrics, save_path=None):
+    """绘制每代第一 Pareto 前沿解数量曲线（横轴 = 代数，纵轴 = 平均解数量）"""
+    sizes = np.asarray(generation_metrics['front_size_mean'])
+    gens = np.arange(len(sizes))
+    plt.figure(figsize=(10, 6))
+    plt.plot(gens, sizes, '-s', color='tab:purple', linewidth=2.5, markersize=5,
+             alpha=0.9, label='Mean Front Size')
+    plt.xlabel('Generation', fontsize=13)
+    plt.ylabel('Number of Pareto Solutions', fontsize=13)
+    plt.title('Number of Pareto Front Solutions per Generation', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=11, loc='best')
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  前沿解数量曲线已保存至: {save_path}")
+    plt.show()
+
+
+def plot_global_pareto_front(global_front, save_dir):
+    """绘制最终全局 Pareto 前沿的主图（L2 vs -RSE，按 n_actual 着色 + 颜色条）
+
+    【双目标改造】原 plot_pareto_2d_projections 的三张两两组合投影合并为一张主 Pareto 图，
+    函数随之更名：双目标下前沿本身就是二维平面曲线，n-RSE / n-L2 不再是 Pareto 投影，直接删除。
+    global_front: shape=(k,3)，列顺序 (L2, -RSE, n_actual 附带属性，不参与支配)
+    返回实际保存的图片路径列表。
     """
-    model.to(device)
-    lba_model.to(device)
-    model.eval()
-    lba_model.eval()
+    plt.figure(figsize=(10, 7))
+    sc = plt.scatter(global_front[:, 0], global_front[:, 1], c=global_front[:, 2],
+                     cmap='viridis', s=70, alpha=0.9, edgecolors='k', linewidths=0.5)
+    cb = plt.colorbar(sc)
+    cb.set_label('n_actual (constraint variable, sparsity)', fontsize=12)
+    plt.xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
+    plt.ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
+    plt.title('Global Pareto Front: L2 Norm vs -RSE (colored by sparsity n, L0 as constraint)',
+              fontsize=13, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, 'pareto_l2_rse.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"  主 Pareto 图已保存至: {save_path}")
+    plt.show()
+    return [save_path]
 
-    X_adv_total = torch.empty(0).to(device)
-    Y_adv_total = torch.empty(0).to(device)
-    Y_pred_total = torch.empty(0).to(device)
 
-    windows_cnt = X_test.shape[1]
-    features_cnt = X_test.shape[2]
-    no_attack_class = windows_cnt * features_cnt
+def collect_global_front_solutions(all_generation_pareto):
+    """复现全局最终 Pareto 前沿筛选（二维非支配），返回前沿解对应的变长决策向量列表
 
-    # 预处理精确扰动特征列表
-    valid_perturb_features = None
-    if perturb_features is not None:
-        valid_perturb_features = [f for f in perturb_features if 0 <= f < features_cnt]
-
-    # 空列表表示不允许扰动任何特征
-    if perturb_features is not None and len(perturb_features) == 0:
-        valid_perturb_features = []
-
-    for test_ind in range(X_test.shape[0]):
-        X_current = X_test[test_ind].unsqueeze(0).to(device)
-
-        # 没有允许扰动的特征，直接返回原始预测
-        if valid_perturb_features is not None and len(valid_perturb_features) == 0:
-            with torch.no_grad():
-                original_pred = model(X_current).item()
-            X_adv_total = torch.cat((X_adv_total, X_current), dim=0)
-            Y_adv_total = torch.cat((Y_adv_total, torch.tensor([[original_pred]]).to(device)), dim=0)
-            Y_pred_total = torch.cat((Y_pred_total, torch.tensor([[original_pred]]).to(device)), dim=0)
+    依赖 run_nsga2_standalone_attack 写入的 final_pareto_solutions 字段
+    （与 final_pareto_obj 行序一一对应），筛选口径与全局前沿完全一致：
+    支配只按前两列 [L2, -RSE]，n_actual 附带属性不参与。
+    """
+    objs_list, solutions_list = [], []
+    for rec in all_generation_pareto:
+        obj = rec.get('final_pareto_obj')
+        sols = rec.get('final_pareto_solutions')
+        if not (isinstance(obj, np.ndarray) and obj.shape[0] > 0 and sols):
             continue
+        for j in range(min(obj.shape[0], len(sols))):
+            objs_list.append(obj[j])
+            solutions_list.append(sols[j])
+    if not objs_list:
+        return []
+    combined = np.vstack(objs_list)
+    keep = extract_first_front_indices(combined[:, :2])   # 仅按双目标筛选，附带属性不参与支配
+    return [solutions_list[i] for i in keep]
 
+
+def decode_perturb_positions(solution, seq_len, num_features):
+    """解码变长个体编码的扰动位置集合（(t,f) 去重，与 _apply_perturbation 的合并口径一致）"""
+    positions = set()
+    n_points = len(solution) // 3
+    for i in range(n_points):
+        t = int(np.clip(round(solution[3 * i]), 0, seq_len - 1))
+        f = int(np.clip(round(solution[3 * i + 1]), 0, num_features - 1))
+        positions.add((t, f))
+    return positions
+
+
+def plot_perturb_position_heatmap(all_generation_pareto, seq_len, num_features,
+                                  feature_names, save_path=None):
+    """绘制全局 Pareto 前沿扰动位置频次热力图
+
+    统计全局前沿所有解中每个 (时间步 t, 特征 f) 位置被选为扰动点的总频次；
+    横轴 = 时间步索引，纵轴 = 特征名称，颜色越深代表被选中频次越高。
+    返回频次矩阵 shape=(num_features, seq_len)。
+    """
+    solutions = collect_global_front_solutions(all_generation_pareto)
+    freq = np.zeros((num_features, seq_len))
+    for sol in solutions:
+        for (t, f) in decode_perturb_positions(sol, seq_len, num_features):
+            freq[f, t] += 1
+    if freq.sum() == 0:
+        print("警告: 全局 Pareto 前沿无扰动位置数据，跳过热力图绘制")
+        return freq
+    plt.figure(figsize=(14, 3.5))
+    im = plt.imshow(freq, aspect='auto', cmap='Blues', interpolation='nearest')
+    cb = plt.colorbar(im)
+    cb.set_label('Selection Frequency', fontsize=12)
+    plt.yticks(range(num_features), feature_names, fontsize=10)
+    plt.xlabel('Time Step Index', fontsize=12)
+    plt.title('Frequency of Perturbation Positions (Global Pareto Front)',
+              fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  扰动位置频次热力图已保存至: {save_path}")
+    plt.show()
+    return freq
+
+
+def plot_sample_attack_compare(model, X_eval, Y_eval, X_adv_total, metrics,
+                               min_speed, max_speed, device, save_path=None):
+    """绘制 RSE 中位典型样本的攻击前后预测对比图
+
+    样本选择：按选中解 RSE 排序，取中位附近的 2 个典型样本。
+    每个子图内容（单步预测模型只输出下一时刻单个预测值，故按输入序列 + 预测点呈现）：
+      - 真实风速输入序列（蓝色实线）与攻击后输入序列（红色虚线）
+      - 下一时刻的真实值 / 干净预测 / 攻击后预测三个标记点对比
+    图内标注该样本的 L2 范数、RSE、实际扰动点数 n。
+    返回选取样本的双目标与约束变量信息列表（供 analysis_data.pkl 持久化）。
+    """
+    sel_rses = np.asarray(metrics.get('sel_rses', []))
+    n_total = len(sel_rses)
+    if n_total == 0:
+        print("警告: 无样本级攻击数据可绘图")
+        return []
+    order = np.argsort(sel_rses)
+    if n_total >= 2:
+        picks = [int(order[n_total // 2 - 1]), int(order[n_total // 2])]   # RSE 中位附近 2 个
+    else:
+        picks = [int(order[0])]
+
+    model.to(device)
+    model.eval()
+    wind_col = X_eval.shape[2] - 1        # 风速特征为 FEATURE_COLUMNS 最后一列
+    scale = max_speed - min_speed
+    typical_info = []
+
+    fig, axes = plt.subplots(len(picks), 1, figsize=(12, 5 * len(picks)))
+    axes = np.atleast_1d(axes)
+    for ax, idx in zip(axes, picks):
+        x_clean = X_eval[idx].detach().cpu().numpy()          # (seq_len, num_features) 归一化输入
+        x_adv = X_adv_total[idx].detach().cpu().numpy()       # 攻击后输入
+        y_true = Y_eval[idx].detach().cpu().item()
         with torch.no_grad():
-            output_cls, output_atk = lba_model(X_current)
+            pred_clean = model(X_eval[idx].unsqueeze(0).to(device)).item()
+            pred_adv = model(X_adv_total[idx].unsqueeze(0).to(device)).item()
 
-        # 特征约束：分类头前 features_cnt*windows_cnt 个 logits 按 feature-major 排列
-        # 掩码末位对应"无攻击"类，始终保留为可选
-        if valid_perturb_features:
-            pos_mask = torch.zeros(features_cnt, windows_cnt, device=output_cls.device)
-            pos_mask[valid_perturb_features, :] = 1.0
-            mask = torch.cat((pos_mask.reshape(1, -1),
-                              torch.ones(1, 1, device=output_cls.device)), dim=1)
-            output_cls = output_cls + (mask - 1) * 1e9
-        elif feature_constraint is not None and feature_constraint < features_cnt:
-            # 选敏感度最高的 k 个特征
-            cls_reshaped = output_cls[0, :no_attack_class].reshape(features_cnt, windows_cnt)
-            feat_sensitivity = cls_reshaped.sum(dim=1)
-            top_feats = torch.topk(feat_sensitivity, feature_constraint).indices
-            pos_mask = torch.zeros(features_cnt, windows_cnt, device=output_cls.device)
-            pos_mask[top_feats, :] = 1.0
-            mask = torch.cat((pos_mask.reshape(1, -1),
-                              torch.ones(1, 1, device=output_cls.device)), dim=1)
-            output_cls = output_cls + (mask - 1) * 1e9
+        # 反归一化到真实风速尺度 (m/s)
+        seq_true = x_clean[:, wind_col] * scale + min_speed
+        seq_adv = x_adv[:, wind_col] * scale + min_speed
+        y_t = y_true * scale + min_speed
+        p_clean = pred_clean * scale + min_speed
+        p_adv = pred_adv * scale + min_speed
+        t_axis = np.arange(len(seq_true) + 1)
 
-        # 选取 Top-n 敏感点
-        _, point = torch.topk(output_cls, n, dim=1)
-        perturbations = output_atk.detach()[0].cpu().numpy().tolist()
-        point = point[0].cpu().numpy().tolist()
+        ax.plot(t_axis[:-1], seq_true, color='tab:blue', linewidth=1.8,
+                label='真实风速值 (输入窗口)')
+        ax.plot(t_axis[:-1], seq_adv, color='tab:red', linewidth=1.4, linestyle='--',
+                alpha=0.85, label='攻击后输入序列')
+        ax.plot([t_axis[-1]], [y_t], 'o', color='tab:blue', markersize=9,
+                label='真实值 (下一时刻)')
+        ax.plot([t_axis[-1]], [p_clean], '^', color='tab:green', markersize=10,
+                label='干净模型预测值')
+        ax.plot([t_axis[-1]], [p_adv], 'X', color='tab:red', markersize=11,
+                label='攻击后预测值')
+        # 标注风速特征上被扰动的位置（其他特征的扰动不改变风速曲线，仅在 L2/n 统计中体现）
+        diff_mask = np.abs(x_adv[:, wind_col] - x_clean[:, wind_col]) > 1e-12
+        if np.any(diff_mask):
+            ax.scatter(np.where(diff_mask)[0], seq_adv[diff_mask], s=90, facecolors='none',
+                       edgecolors='red', linewidths=1.6, zorder=5, label='扰动位置 (风速特征)')
 
-        X_adv = X_current.clone()
-        for ind, po in enumerate(point):
-            if po == no_attack_class:
-                continue
-            ind_feature, ind_window = po // windows_cnt, po % windows_cnt
-            real_perturb = perturbations[ind] * beta  # 将回归头输出的归一化扰动值还原为真实尺度
-            X_adv[0][ind_window][ind_feature] += delta * real_perturb
+        l2 = metrics['sel_l2_norms'][idx]
+        rse = metrics['sel_rses'][idx]
+        n_act = metrics['sel_n_actuals'][idx]
+        ax.set_title(f'Attack Effect Comparison on Sample #{idx}\n'
+                     f'L2 = {l2:.4f}, RSE = {rse:.3f}, n_actual = {n_act}',
+                     fontsize=12, fontweight='bold')
+        ax.set_xlabel('时间步', fontsize=12)
+        ax.set_ylabel('风速 (m/s)', fontsize=12)
+        ax.legend(fontsize=9, loc='best')
+        ax.grid(True, alpha=0.3)
+        typical_info.append({'sample_idx': idx, 'l2_norm': float(l2),
+                             'rse': float(rse), 'n_actual': int(n_act)})
 
-        with torch.no_grad():
-            adv_pred = model(X_adv).item()
-            original_pred = model(X_current).item()
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  典型样本攻击对比图已保存至: {save_path}")
+    plt.show()
+    return typical_info
 
-        X_adv_total = torch.cat((X_adv_total, X_adv), dim=0)
-        Y_adv_total = torch.cat((Y_adv_total, torch.tensor([[adv_pred]]).to(device)), dim=0)
-        Y_pred_total = torch.cat((Y_pred_total, torch.tensor([[original_pred]]).to(device)), dim=0)
 
-    return X_adv_total, Y_adv_total, Y_pred_total
-
+# =============================================================================
+# SECTION 8: 攻击效果评估
+# =============================================================================
 
 def evaluate_attack(model, X_test, Y_test, X_adv, min_speed, max_speed, attack_name, device):
     """
@@ -2121,559 +2220,9 @@ def evaluate_attack(model, X_test, Y_test, X_adv, min_speed, max_speed, attack_n
     }
 
 
-# =============================================================================
-# SECTION 9: INTEGRATED LBA PIPELINE FOR MoACB-WSF (修正版)
-# =============================================================================
-
-def run_lba_pipeline(model, X_test, Y_test, min_speed, max_speed, device,
-                     beta=0.1, n=1, maxiter=60, pop_size=15,
-                     adv_cnt=100, lba_epochs=50, lba_lr=0.005, lba_batch_size=25,
-                     delta_list=None, use_bayesian=False,
-                     feature_constraint=None, perturb_features=None, print_info=True, dir_weight=1.0):
-    """
-    完整 LBA 攻击管线（攻击目标为传入的 MoACB 模型）
-    1. 拆分测试集为 LBA 训练子集 和 评估子集，严格隔离避免效果虚高
-    2. 在训练子集上跑 NSGA-II nVITA 生成对抗样本，训练 LBA 模型
-    3. 在评估子集上同时测试 NSGA-II nVITA 基线 和 LBA 攻击，保证对比公平
-
-    beta: nVITA 扰动预算系数（原论文 β）
-    delta_list: LBA 攻击缩放系数列表（原论文 δ）
-    feature_constraint: 扰动特征数量约束 (None=不限制, 整数=限定特征数)
-    perturb_features: 精确指定要扰动的特征索引 (None=不限制)
-    """
-    if delta_list is None:
-        delta_list = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
-
-    results = {}
-    seq_len = X_test.shape[1]
-    num_features = X_test.shape[2]
-
-    # 对齐官方实现，nVITA 预算基准改用每个样本窗口内的特征极差（在 NVITA 内部逐样本计算）
-    # 这里仅作为回退值传入
-    feature_ranges = np.ones(num_features)
-
-    print("\n" + "=" * 60)
-    print("启动 LBA 对抗攻击评估流程 (目标模型: MoACB-WSF)")
-    if perturb_features is not None:
-        # 显示二进制掩码和对应的特征
-        feature_names = ['风向', '理论功率', '实际功率', '风速']
-        mask_str = ''.join(['1' if i in perturb_features else '0' for i in range(4)])
-        feature_desc = []
-        for i in perturb_features:
-            if i < len(feature_names):
-                feature_desc.append(f"{i}({feature_names[i]})")
-        print(f"扰动特征掩码: {mask_str}")
-        print(f"精确扰动特征: {', '.join(feature_desc)}")
-    elif feature_constraint is not None:
-        print(f"扰动特征数量约束: {feature_constraint} 个特征")
-    else:
-        print("扰动特征: 无限制（所有特征）")
-    print("=" * 60)
-
-    X_test_att = X_test.to(device)
-    Y_test_att = Y_test.to(device)
-
-    # ========== 拆分测试集为 LBA 训练子集 和 评估子集 ==========
-    # 时序划分：前 adv_cnt 个样本用于训练 LBA，剩余样本用于评估
-    total_num = X_test_att.shape[0]
-    train_idx = torch.arange(adv_cnt, device=device)
-    eval_idx = torch.arange(adv_cnt, total_num, device=device)
-
-    X_lba_train = X_test_att[train_idx]
-    Y_lba_train = Y_test_att[train_idx]
-    X_eval_att = X_test_att[eval_idx]
-    Y_eval_att = Y_test_att[eval_idx]
-
-    print(f"\n数据集拆分 (时序划分): 总计 {total_num} 个样本")
-    print(f"  LBA 训练子集: {len(train_idx)} 个样本 (索引 0~{adv_cnt - 1})")
-    print(f"  攻击评估子集: {len(eval_idx)} 个样本 (索引 {adv_cnt}~{total_num - 1})")
-
-    # Step 1: 在训练子集上跑 NSGA-II nVITA，生成 LBA 训练数据
-    print(f"\n[Step 1/4] NSGA-II nVITA 在 LBA 训练子集上生成对抗样本 (beta={beta}, n={n})...")
-    X_adv_train, _, train_all_generation_pareto = run_nsga2_standalone_attack(
-        model, X_lba_train, Y_lba_train,
-        beta=beta, n=n, maxiter=maxiter, pop_size=pop_size, device=device,
-        feature_ranges=feature_ranges,
-        feature_constraint=feature_constraint,
-        perturb_features=perturb_features,
-        print_info=print_info
-    )
-
-    # Step 2: 构建 LBA 训练数据集（逐样本提取敏感点位置与扰动值）
-    print(f"\n[Step 2/4] 构建 LBA 训练集...")
-    lba_data = get_LBA_Dataset(X_lba_train, X_adv_train, n, device, beta=beta)
-    print(f"  训练集大小: {len(lba_data)} 个样本")
-    # 诊断：训练子集上 nVITA 真实标签的方向分布，与评估子集对比，排查时序划分导致的分布漂移
-    _, train_values_true = build_sensitive_labels(X_adv_train, X_lba_train, n)
-    print_sign_distribution(train_values_true, "LBA训练子集(nVITA真实值)")
-
-    # Step 3: 训练 LBA 模型
-    print(f"\n[Step 3/4] 训练 LBA 模型 (epochs={lba_epochs}, lr={lba_lr}, bayesian={use_bayesian})...")
-    lba_model = CNN_LBA_Model(num_features, seq_len, n, use_bayesian=use_bayesian)
-    loss_cls_list, loss_reg_list = train_lba_model(
-        lba_data, lba_model,
-        batch_size=lba_batch_size, learning_rate=lba_lr, epochs=lba_epochs,
-        device=device, print_info=print_info, n=n, use_bayesian=use_bayesian, dir_weight=dir_weight
-    )
-
-    lba_save_path = os.path.join(OUTPUT_DIR, 'LBA_models', 'lba_model_moacb_wsf.pt')
-    torch.save(lba_model.state_dict(), lba_save_path)
-    print(f"  LBA 模型已保存至: {lba_save_path}")
-
-    # 诊断：LBA 模型自身回归头在训练集上的预测方向分布，与训练真实标签对比，
-    # 排查是"训练集上就没学对方向"还是"训练集学对了、但对新样本泛化时失效"
-    lba_model.eval()
-    with torch.no_grad():
-        _, atk_train_pred = lba_model(X_lba_train.to(device))
-    print_sign_distribution(atk_train_pred, "LBA模型预测值(训练集)")
-
-    # Step 4: 在评估子集上同时测试 nVITA 基线 和 LBA 攻击
-    print(f"\n[Step 4/4] 在评估子集上对比攻击性能...")
-
-    # NSGA-II nVITA 基线攻击（在评估子集上）
-    print(f"\n  --- NSGA-II nVITA Baseline (beta={beta}) on eval set ---")
-    X_adv_nvita_eval, nvita_metrics, nvita_all_generation_pareto = run_nsga2_standalone_attack(
-        model, X_eval_att, Y_eval_att,
-        beta=beta, n=n, maxiter=maxiter, pop_size=pop_size, device=device,
-        feature_ranges=feature_ranges,
-        feature_constraint=feature_constraint,
-        perturb_features=perturb_features,
-        print_info=print_info
-    )
-    nvita_results = evaluate_attack(
-        model, X_eval_att, Y_eval_att, X_adv_nvita_eval,
-        min_speed, max_speed, "NSGA-II nVITA (Baseline)", device
-    )
-    results['nVITA'] = nvita_results
-
-    # 构建 nVITA 真实敏感点标签（用于评估 LBA 拟合能力）
-    eval_points_true, eval_values_true = build_sensitive_labels(X_adv_nvita_eval, X_eval_att, n)
-    print_sign_distribution(eval_values_true, "评估子集(nVITA真实值)")
-    # 诊断：LBA 模型自身回归头在评估集上的预测方向分布，与上面训练集的诊断对比
-    with torch.no_grad():
-        _, atk_eval_pred = lba_model(X_eval_att.to(device))
-    print_sign_distribution(atk_eval_pred, "LBA模型预测值(评估集)")
-
-    # 用于可视化的原始数据缓存
-    viz_data = {
-        'y_true': None,
-        'y_clean': None,
-        'y_nvita': None,
-        'y_lba': {},  # delta -> predictions
-        'X_clean': X_eval_att.clone(),
-        'X_nvita': X_adv_nvita_eval.clone(),
-        'X_lba': {},  # delta -> adv samples
-        'feature_columns': ['风向', '理论功率', '实际功率', '风速'],
-    }
-    with torch.no_grad():
-        viz_data['y_true'] = Y_eval_att.cpu().numpy().flatten()
-        viz_data['y_clean'] = model(X_eval_att).cpu().numpy().flatten()
-        viz_data['y_nvita'] = model(X_adv_nvita_eval).cpu().numpy().flatten()
-
-    # LBA 攻击（在评估子集上）+ 拟合质量指标
-    lba_pareto_points = []  # 各 delta 下 LBA 攻击在 Pareto 坐标系中的坐标与性能
-    for delta in delta_list:
-        print(f"\n  --- LBA Attack (delta={delta}) on eval set ---")
-        X_adv_lba_eval, _, _ = run_lba_attack(
-            model, lba_model, X_eval_att, Y_eval_att, delta, n, device,
-            feature_constraint=feature_constraint, perturb_features=perturb_features, print_info=False,
-            beta=beta, feature_ranges=feature_ranges
-        )
-        # 反归一化前保存原始预测用于可视化
-        with torch.no_grad():
-            viz_data['y_lba'][delta] = model(X_adv_lba_eval).cpu().numpy().flatten()
-        viz_data['X_lba'][delta] = X_adv_lba_eval.clone()
-
-        lba_results = evaluate_attack(
-            model, X_eval_att, Y_eval_att, X_adv_lba_eval,
-            min_speed, max_speed, f"LBA (delta={delta})", device
-        )
-
-        # 计算 LBA 拟合质量指标：AR 和扰动 RMSE
-        ar, perturb_rmse = evaluate_lba_fitting_quality(
-            lba_model, X_eval_att, eval_points_true, eval_values_true, n, device, beta=beta
-        )
-        lba_results['sensitive_ar'] = ar
-        lba_results['perturb_rmse'] = perturb_rmse
-        print(f"  [LBA 拟合指标] 敏感点准确率 AR: {ar:.4f}, 扰动值 RMSE: {perturb_rmse:.6f}")
-
-        results[f'LBA_delta_{delta}'] = lba_results
-
-        # 记录 LBA 学到的攻击模式在 Pareto 坐标系中的位置与性能
-        # L2 口径与 nVITA 一致：均只有 n 个稀疏点被扰动，||X_adv-X||_2 即扰动值向量 L2
-        perturb_l2 = torch.sqrt(((X_adv_lba_eval - X_eval_att) ** 2).sum(dim=(1, 2))).mean().item()
-        clean_rmse = lba_results['rmse_clean']
-        lba_rse = lba_results['rmse_adv'] / clean_rmse if clean_rmse > 0 else 0.0
-        lba_pareto_points.append({
-            'delta': delta, 'l2': perturb_l2, 'rse': lba_rse,
-            'rmse_adv': lba_results['rmse_adv'],
-            'drop_rmse_pct': lba_results['drop_rmse_pct'],
-            'sensitive_ar': ar,
-        })
-
-    # 打印 LBA 学到的攻击模式坐标（与教师攻击 Pareto 前沿同一坐标系）
-    print("\n" + "=" * 60)
-    print("LBA 学到的攻击模式 (Pareto 前沿坐标系: 扰动 L2 / RSE)")
-    print("=" * 60)
-    print(f"{'delta':>8} {'Perturb_L2':>12} {'RSE':>10} {'RMSE_adv':>10} {'Drop%':>10} {'AR':>8}")
-    for pt in lba_pareto_points:
-        print(f"{pt['delta']:>8.2f} {pt['l2']:>12.6f} {pt['rse']:>10.4f} "
-              f"{pt['rmse_adv']:>10.4f} {pt['drop_rmse_pct']:>10.2f} {pt['sensitive_ar']:>8.4f}")
-
-    # 总结对比
-    print("\n" + "=" * 60)
-    print("LBA 攻击评估总结 (目标模型: MoACB-WSF)")
-    print("=" * 60)
-    print(f"{'Attack Method':<20} {'RMSE_adv':>10} {'MAPE(%)':>10} {'Drop%':>10} {'AR':>8} {'Pert_RMSE':>10}")
-    print("-" * 78)
-    for key, val in results.items():
-        ar_str = f"{val['sensitive_ar']:>8.4f}" if 'sensitive_ar' in val else f"{'—':>8}"
-        pr_str = f"{val['perturb_rmse']:>10.6f}" if 'perturb_rmse' in val else f"{'—':>10}"
-        print(f"{val['attack_name']:<20} {val['rmse_adv']:>10.4f} {val['mape_adv']:>10.2f} "
-              f"{val['drop_rmse_pct']:>10.2f} {ar_str} {pr_str}")
-
-    # 保存对抗攻击可视化图表
-    os.makedirs(os.path.join(OUTPUT_DIR, 'attack_figures'), exist_ok=True)
-    viz_prefix = os.path.join(OUTPUT_DIR, 'attack_figures', f'beta{beta}_adv{adv_cnt}_')
-    try:
-        plot_lba_training_loss(loss_cls_list, loss_reg_list, save_path=viz_prefix + 'lba_training_loss.png')
-        plot_attack_effectiveness(results, save_path=viz_prefix + 'attack_effectiveness.png')
-        plot_clean_vs_adv_predictions(viz_data, min_speed, max_speed,
-                                      save_path=viz_prefix + 'clean_vs_adv_predictions.png')
-        plot_perturbation_analysis(viz_data, save_path=viz_prefix + 'perturbation_analysis.png')
-        plot_lba_perturbation_sign_distribution(viz_data, save_path=viz_prefix + 'perturbation_sign_distribution.png')
-        print(f"\n对抗攻击可视化图表已保存至: {os.path.join(OUTPUT_DIR, 'attack_figures')}/")
-    except Exception as e:
-        print(f"\n警告: 生成对抗攻击可视化图表时出错: {e}")
-        traceback.print_exc()
-
-    pareto_artifacts = {
-        'train_generation_pareto': train_all_generation_pareto,
-        'baseline_eval_generation_pareto': nvita_all_generation_pareto,
-        'baseline_eval_metrics': nvita_metrics,
-        'lba_points': lba_pareto_points,
-    }
-    return results, lba_model, X_adv_nvita_eval, pareto_artifacts
-
 
 # =============================================================================
-# SECTION 9b: 对抗攻击可视化函数
-# =============================================================================
-
-def plot_lba_training_loss(loss_cls_list, loss_reg_list, save_path=None):
-    """
-    绘制 LBA 模型训练过程中的损失曲线
-    左图：分类损失(敏感点定位 CrossEntropyLoss)随 epoch 变化
-    右图：回归损失(扰动值 MSELoss)随 epoch 变化
-    """
-    epochs_range = np.arange(1, len(loss_cls_list) + 1)
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle('LBA 模型训练损失曲线', fontsize=16, fontweight='bold')
-
-    ax1 = axes[0]
-    ax1.plot(epochs_range, loss_cls_list, 'o-', color='#2E86AB', linewidth=1.5, markersize=3)
-    ax1.set_xlabel('Epoch', fontsize=11)
-    ax1.set_ylabel('分类损失 (CrossEntropyLoss)', fontsize=11)
-    ax1.set_title('敏感点定位损失', fontsize=13)
-    ax1.grid(True, alpha=0.3)
-
-    ax2 = axes[1]
-    ax2.plot(epochs_range, loss_reg_list, 's-', color='#A23B72', linewidth=1.5, markersize=3)
-    ax2.set_xlabel('Epoch', fontsize=11)
-    ax2.set_ylabel('回归损失 (MSELoss)', fontsize=11)
-    ax2.set_title('扰动值回归损失', fontsize=13)
-    ax2.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  已保存: {save_path}")
-    plt.show()
-
-
-def plot_attack_effectiveness(results, save_path=None):
-    """
-    绘制攻击效果对比图：RMSE 下降率柱状图 + AR 折线图
-    类似论文中对比不同攻击方法效果的图表
-    """
-    methods = []
-    drop_rates = []
-    ar_values = []
-    rmse_adv_values = []
-    perturb_rmse_values = []
-
-    for key, val in results.items():
-        methods.append(val['attack_name'])
-        drop_rates.append(val['drop_rmse_pct'])
-        rmse_adv_values.append(val['rmse_adv'])
-        ar_values.append(val.get('sensitive_ar', None))
-        perturb_rmse_values.append(val.get('perturb_rmse', None))
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle('LBA 与 nVITA 攻击效果对比', fontsize=16, fontweight='bold')
-
-    # 左图：RMSE 下降率柱状图
-    ax1 = axes[0]
-    colors = ['#2E86AB' if 'nVITA' in m else '#A23B72' for m in methods]
-    bars = ax1.bar(methods, drop_rates, color=colors, alpha=0.8, edgecolor='black')
-    ax1.axhline(y=0, color='red', linestyle='--', linewidth=1.5, label='无攻击基线')
-    ax1.set_ylabel('RMSE 下降率 (%)', fontsize=12)
-    ax1.set_title('攻击导致的 RMSE 相对变化', fontsize=14)
-    ax1.tick_params(axis='x', rotation=30)
-    ax1.grid(True, axis='y', alpha=0.3)
-    ax1.legend()
-
-    # 在柱子上标注数值
-    for bar, val in zip(bars, drop_rates):
-        height = bar.get_height()
-        ax1.annotate(f'{val:.2f}%',
-                     xy=(bar.get_x() + bar.get_width() / 2, height),
-                     xytext=(0, 3 if height >= 0 else -15),
-                     textcoords="offset points", ha='center', va='bottom' if height >= 0 else 'top',
-                     fontsize=9)
-
-    # 右图：AR（敏感点定位准确率）+ 扰动值 RMSE（扰动幅值拟合误差），双 y 轴对比
-    ax2 = axes[1]
-    lba_methods = [m for m, ar in zip(methods, ar_values) if ar is not None]
-    lba_ar = [ar for ar in ar_values if ar is not None]
-    lba_pr = [pr for pr in perturb_rmse_values if pr is not None]
-    if lba_ar:
-        line1 = ax2.plot(lba_methods, lba_ar, 'o-', color='#F18F01', linewidth=2, markersize=8,
-                          label='敏感点准确率 AR')
-        ax2.set_ylim(0, 1.05)
-        ax2.set_ylabel('AR (Accuracy Rate)', fontsize=12, color='#F18F01')
-        ax2.set_title('LBA 拟合质量: 敏感点定位 AR 与扰动幅值 RMSE', fontsize=14)
-        ax2.tick_params(axis='x', rotation=30)
-        ax2.tick_params(axis='y', labelcolor='#F18F01')
-        ax2.grid(True, alpha=0.3)
-        for i, (m, ar) in enumerate(zip(lba_methods, lba_ar)):
-            ax2.annotate(f'{ar:.3f}', xy=(i, ar), xytext=(0, 10),
-                         textcoords="offset points", ha='center', fontsize=9, color='#F18F01')
-
-        lines = line1
-        if lba_pr and len(lba_pr) == len(lba_methods):
-            ax2b = ax2.twinx()
-            line2 = ax2b.plot(lba_methods, lba_pr, 's--', color='#6A0DAD', linewidth=2, markersize=8,
-                               label='扰动值 RMSE')
-            ax2b.set_ylabel('扰动值 RMSE (归一化空间)', fontsize=12, color='#6A0DAD')
-            ax2b.tick_params(axis='y', labelcolor='#6A0DAD')
-            for i, (m, pr) in enumerate(zip(lba_methods, lba_pr)):
-                ax2b.annotate(f'{pr:.4f}', xy=(i, pr), xytext=(0, -15),
-                              textcoords="offset points", ha='center', fontsize=9, color='#6A0DAD')
-            lines = line1 + line2
-        ax2.legend(lines, [l.get_label() for l in lines], loc='best')
-    else:
-        ax2.text(0.5, 0.5, '无 AR/RMSE 数据', transform=ax2.transAxes, ha='center', va='center', fontsize=12)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  已保存: {save_path}")
-    plt.show()
-
-
-def plot_clean_vs_adv_predictions(viz_data, min_speed, max_speed, save_path=None, max_points=500):
-    """
-    绘制清洁预测与对抗预测的时序对比图
-    反归一化到原始风速尺度后绘制
-    """
-    y_true = viz_data['y_true'] * (max_speed - min_speed) + min_speed
-    y_clean = viz_data['y_clean'] * (max_speed - min_speed) + min_speed
-    y_nvita = viz_data['y_nvita'] * (max_speed - min_speed) + min_speed
-
-    n_samples = len(y_true)
-    n_plot = min(max_points, n_samples)
-    idx = np.arange(n_plot)
-
-    # 计算需要多少个子图：1 个 nVITA + N 个 LBA delta
-    n_lba = len(viz_data['y_lba'])
-    n_cols = 2
-    n_rows = int(np.ceil((1 + n_lba) / n_cols))
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4 * n_rows), squeeze=False)
-    fig.suptitle('清洁预测 vs 对抗预测对比（反归一化风速）', fontsize=16, fontweight='bold')
-
-    def plot_single(ax, y_adv, title):
-        ax.plot(idx, y_true[:n_plot], 'b-', linewidth=1.5, label='真实值', alpha=0.8)
-        ax.plot(idx, y_clean[:n_plot], 'g--', linewidth=1.5, label='清洁预测', alpha=0.8)
-        ax.plot(idx, y_adv[:n_plot], 'r-', linewidth=1.5, label='对抗预测', alpha=0.7)
-        ax.set_xlabel('样本索引', fontsize=11)
-        ax.set_ylabel('风速 (m/s)', fontsize=11)
-        ax.set_title(title, fontsize=12)
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
-
-    # nVITA
-    plot_single(axes[0, 0], y_nvita, 'nVITA 基线攻击')
-
-    # LBA variants
-    for i, delta in enumerate(sorted(viz_data['y_lba'].keys())):
-        row = (i + 1) // n_cols
-        col = (i + 1) % n_cols
-        y_lba = viz_data['y_lba'][delta] * (max_speed - min_speed) + min_speed
-        plot_single(axes[row, col], y_lba, f'LBA 攻击 (delta={delta})')
-
-    # 隐藏未使用的子图
-    for j in range(1 + n_lba, n_rows * n_cols):
-        row = j // n_cols
-        col = j % n_cols
-        axes[row, col].axis('off')
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  已保存: {save_path}")
-    plt.show()
-
-
-def plot_perturbation_analysis(viz_data, save_path=None):
-    """
-    绘制扰动分析图：
-    - 各攻击方法下各特征的平均扰动幅值
-    - nVITA 与 LBA 扰动分布对比
-    """
-    feature_columns = viz_data['feature_columns']
-    num_features = len(feature_columns)
-
-    # 计算各特征上的平均绝对扰动
-    def mean_abs_perturb(X_adv, X_clean):
-        diff = (X_adv - X_clean).abs().cpu().numpy()  # (N, seq_len, num_features)
-        return diff.mean(axis=(0, 1))  # (num_features,)
-
-    nvita_perturb = mean_abs_perturb(viz_data['X_nvita'], viz_data['X_clean'])
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle('对抗扰动分析', fontsize=16, fontweight='bold')
-
-    # 左图：各特征平均扰动幅值对比
-    ax1 = axes[0]
-    x_pos = np.arange(num_features)
-    width = 0.15
-    ax1.bar(x_pos - width, nvita_perturb, width, label='nVITA', color='#2E86AB', alpha=0.8, edgecolor='black')
-    colors_lba = ['#A23B72', '#F18F01', '#C73E1D', '#3B1F2B']
-    for i, delta in enumerate(sorted(viz_data['X_lba'].keys())):
-        lba_perturb = mean_abs_perturb(viz_data['X_lba'][delta], viz_data['X_clean'])
-        ax1.bar(x_pos + i * width, lba_perturb, width,
-                label=f'LBA (δ={delta})', color=colors_lba[i % len(colors_lba)], alpha=0.8, edgecolor='black')
-
-    ax1.set_ylabel('平均绝对扰动幅值', fontsize=12)
-    ax1.set_title('各特征上的平均扰动幅值', fontsize=14)
-    ax1.set_xticks(x_pos)
-    ax1.set_xticklabels(feature_columns, rotation=15)
-    ax1.legend(fontsize=10)
-    ax1.grid(True, axis='y', alpha=0.3)
-
-    # 右图：扰动分布筱线图（全部展平的绝对差值，与 LBA 维度对齐）
-    ax2 = axes[1]
-    nvita_flat = (viz_data['X_nvita'] - viz_data['X_clean']).abs().cpu().numpy().flatten()
-    perturb_data = [nvita_flat]
-    labels = ['nVITA']
-    for delta in sorted(viz_data['X_lba'].keys()):
-        diff = (viz_data['X_lba'][delta] - viz_data['X_clean']).abs().cpu().numpy().flatten()
-        perturb_data.append(diff)
-        labels.append(f'LBA δ={delta}')
-
-    bp = ax2.boxplot(perturb_data, labels=labels, patch_artist=True)
-    for patch, color in zip(bp['boxes'], ['#2E86AB'] + colors_lba[:len(bp['boxes']) - 1]):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.7)
-    ax2.set_ylabel('绝对扰动幅值', fontsize=12)
-    ax2.set_title('扰动幅值分布箱线图', fontsize=14)
-    ax2.tick_params(axis='x', rotation=30)
-    ax2.grid(True, axis='y', alpha=0.3)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  已保存: {save_path}")
-    plt.show()
-
-
-def plot_lba_perturbation_sign_distribution(viz_data, save_path=None):
-    """
-    绘制扰动值符号(正负)分布图。
-    与 plot_perturbation_analysis 只展示绝对幅值不同，本图保留扰动值的正负号，
-    用于观察各攻击方法/各特征上扰动方向(增大/减小)的分布规律：
-    - 左图：各特征上的平均带符号扰动幅值（正=特征被增大，负=特征被减小）
-    - 右图：只取实际被扰动的位置(diff != 0)，绘制带符号扰动值分布箱线图，
-            并标注正/负扰动样本占比
-    """
-    feature_columns = viz_data['feature_columns']
-    num_features = len(feature_columns)
-
-    def mean_signed_perturb(X_adv, X_clean):
-        diff = (X_adv - X_clean).cpu().numpy()  # (N, seq_len, num_features)
-        return diff.mean(axis=(0, 1))  # (num_features,) 保留正负号
-
-    def nonzero_signed_perturb(X_adv, X_clean):
-        diff = (X_adv - X_clean).cpu().numpy().flatten()
-        nz = diff[diff != 0]
-        return nz if len(nz) > 0 else np.array([0.0])
-
-    nvita_signed = mean_signed_perturb(viz_data['X_nvita'], viz_data['X_clean'])
-    nvita_nz = nonzero_signed_perturb(viz_data['X_nvita'], viz_data['X_clean'])
-    sorted_deltas = sorted(viz_data['X_lba'].keys())
-    colors_lba = ['#A23B72', '#F18F01', '#C73E1D', '#3B1F2B', '#6A0DAD', '#118AB2', '#EF476F', '#06D6A0']
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle('LBA/nVITA 扰动值符号(正负)分布分析', fontsize=16, fontweight='bold')
-
-    # 左图：各特征上的平均带符号扰动幅值
-    ax1 = axes[0]
-    x_pos = np.arange(num_features)
-    width = 0.15
-    ax1.bar(x_pos - width, nvita_signed, width, label='nVITA', color='#2E86AB', alpha=0.8, edgecolor='black')
-    for i, delta in enumerate(sorted_deltas):
-        lba_signed = mean_signed_perturb(viz_data['X_lba'][delta], viz_data['X_clean'])
-        ax1.bar(x_pos + i * width, lba_signed, width,
-                label=f'LBA (δ={delta})', color=colors_lba[i % len(colors_lba)], alpha=0.8, edgecolor='black')
-    ax1.axhline(y=0, color='red', linestyle='--', linewidth=1.2, label='零扰动基线')
-    ax1.set_ylabel('平均带符号扰动幅值', fontsize=12)
-    ax1.set_title('各特征上的平均扰动方向与幅值\n(正=特征被增大, 负=特征被减小)', fontsize=13)
-    ax1.set_xticks(x_pos)
-    ax1.set_xticklabels(feature_columns, rotation=15)
-    ax1.legend(fontsize=9)
-    ax1.grid(True, axis='y', alpha=0.3)
-
-    # 右图：实际被扰动位置的带符号扰动值分布箱线图 + 正/负占比标注
-    ax2 = axes[1]
-    perturb_data = [nvita_nz]
-    labels = ['nVITA']
-    for delta in sorted_deltas:
-        nz = nonzero_signed_perturb(viz_data['X_lba'][delta], viz_data['X_clean'])
-        perturb_data.append(nz)
-        labels.append(f'LBA δ={delta}')
-
-    bp = ax2.boxplot(perturb_data, labels=labels, patch_artist=True, showmeans=True)
-    for patch, color in zip(bp['boxes'], ['#2E86AB'] + colors_lba[:len(bp['boxes']) - 1]):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.7)
-    ax2.axhline(y=0, color='red', linestyle='--', linewidth=1.5, label='零扰动基线')
-    ax2.set_ylabel('带符号扰动值(归一化空间)', fontsize=12)
-    ax2.set_title('实际被扰动位置的带符号扰动值分布', fontsize=13)
-    ax2.tick_params(axis='x', rotation=30)
-    ax2.legend(fontsize=9)
-    ax2.grid(True, axis='y', alpha=0.3)
-
-    # 在每组箱线图上方标注正/负样本占比
-    y_top = ax2.get_ylim()[1]
-    for i, vals in enumerate(perturb_data):
-        pos_ratio = np.mean(vals > 0) * 100
-        neg_ratio = np.mean(vals < 0) * 100
-        ax2.annotate(f'+{pos_ratio:.0f}% / -{neg_ratio:.0f}%',
-                     xy=(i + 1, y_top), xytext=(0, -14), textcoords='offset points',
-                     ha='center', fontsize=8, color='black')
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  已保存: {save_path}")
-    plt.show()
-
-
-# =============================================================================
-# SECTION 10: REPORT GENERATION
+# SECTION 9: REPORT GENERATION
 # =============================================================================
 
 def generate_comprehensive_report(model, test_loader, val_loader, device, min_speed, max_speed,
@@ -2717,7 +2266,7 @@ def generate_comprehensive_report(model, test_loader, val_loader, device, min_sp
     mape_test = test_performance['mape']
 
     fig = plt.figure(figsize=(20, 12))
-    fig.suptitle('MoACB-WSF with LBA Attack - 综合预测报告', fontsize=20, fontweight='bold', y=0.98)
+    fig.suptitle('MoACB-WSF (Fixed Encoding) - 综合预测报告', fontsize=20, fontweight='bold', y=0.98)
 
     ax1 = plt.subplot(2, 3, 1)
     sample_idx = np.arange(0, min(500, len(all_val_targets)))
@@ -2827,48 +2376,47 @@ def generate_comprehensive_report(model, test_loader, val_loader, device, min_sp
 
 
 # =============================================================================
-# SECTION 11: MAIN PROGRAM
+# SECTION 10: MAIN PROGRAM
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='MoACB-WSF with LBA Adversarial Attack')
+    parser = argparse.ArgumentParser(
+        description='MoACB-WSF (Fixed Encoding) with NSGA-II Bi-objective Variable-length Sparse Attack (L0 as constraint)')
     parser.add_argument('--data_file', type=str, default='winddata.xlsx', help='Input data file')
-    parser.add_argument('--no_attack', action='store_true', help='Skip LBA attack evaluation')
-    # 以下超参数均以 LBA_CONFIG 为唯一默认值来源，避免出现与 LBA_CONFIG 不同步的"死配置"；
-    # 命令行传参仍可临时覆盖，不传参时一律生效 LBA_CONFIG 中的设置
-    parser.add_argument('--beta', type=float, default=LBA_CONFIG['beta'], help='nVITA perturbation budget (原论文 β)')
-    parser.add_argument('--n_perturb', type=int, default=LBA_CONFIG['n'], help='Number of perturbations (nVITA)')
-    parser.add_argument('--lba_epochs', type=int, default=LBA_CONFIG['lba_epochs'], help='LBA training epochs')
-    parser.add_argument('--lba_lr', type=float, default=LBA_CONFIG['lba_lr'], help='LBA learning rate')
-    parser.add_argument('--adv_cnt', type=int, default=LBA_CONFIG['adv_cnt'], help='Adv examples for LBA training')
-    parser.add_argument('--pop_size', type=int, default=LBA_CONFIG['pop_size'],
-                        help='NSGA-II population size for nVITA (官方 DE 版默认 15，增大可提升搜索覆盖度但耗时增加)')
-    parser.add_argument('--dir_weight', type=float, default=LBA_CONFIG['dir_weight'],
-                        help='Direction-consistency penalty weight for LBA regression loss (0 = disable)')
-    parser.add_argument('--delta_list', type=float, nargs='+', default=LBA_CONFIG['delta_list'],
-                        help='LBA delta values (原论文 δ)')
-    parser.add_argument('--use_bayesian', action='store_true', default=LBA_CONFIG['use_bayesian'], help='Use BayesianConv1d (requires blitz)')
-    parser.add_argument('--feat_constraint', type=int, default=LBA_CONFIG['feature_constraint'],
-                        help='Number of features allowed to perturb (None = all features)')
-    parser.add_argument('--perturb_mask', type=str, default=LBA_CONFIG['perturb_mask'],
-                        help='Binary mask for feature perturbation. E.g., "0010" means only perturb feature 2')
-    # ====== 新增: 模型冻结与复用参数 ======
+    parser.add_argument('--no_attack', action='store_true', help='Skip NSGA-II attack evaluation')
+    # 以下 NSGA-II 攻击超参数均以 NSGA2_CONFIG 为唯一默认值来源，避免出现与配置不同步的"死配置"；
+    # 命令行传参仍可临时覆盖，不传参时一律生效 NSGA2_CONFIG 中的设置
+    parser.add_argument('--beta', type=float, default=NSGA2_CONFIG['beta'],
+                        help='nVITA perturbation budget (原论文 β)')
+    # ====== 【变长编码】扰动点数上下界，取代原固定 n ======
+    parser.add_argument('--n_min', type=int, default=NSGA2_CONFIG['n_min'],
+                        help='变长编码：每个个体扰动点数下界 (default: 1)')
+    parser.add_argument('--n_max', type=int, default=NSGA2_CONFIG['n_max'],
+                        help='变长编码：每个个体扰动点数上界 (default: 6)')
+    parser.add_argument('--pop_size', type=int, default=NSGA2_CONFIG['pop_size'],
+                        help='NSGA-II population size (增大可提升搜索覆盖度但耗时增加)')
+    parser.add_argument('--maxiter', type=int, default=NSGA2_CONFIG['maxiter'],
+                        help='Maximum generations for NSGA-II attack')
+    parser.add_argument('--select_mode', type=str, default=NSGA2_CONFIG['select_mode'],
+                        choices=['knee', 'max_rse'],
+                        help="最终解选择策略: 'knee'=双目标归一化折中膝点（n_actual 作 tie-break） / 'max_rse'=攻击强度上界端点")
+    parser.add_argument('--knee_min_rse', type=float, default=NSGA2_CONFIG['knee_min_rse'],
+                        help='膝点有效性下界：仅 RSE>=该值的前沿点可作膝点候选')
+    # ====== 模型冻结与复用参数 ======
     parser.add_argument('--save_model', type=str, default=None,
                         help='Path to save the trained model checkpoint (model weights + architecture params)')
     parser.add_argument('--load_model', type=str, default=None,
-                        help='Path to load a pre-trained model checkpoint (skip NSGA-II search and training)')
+                        help='Path to load a pre-trained model checkpoint (skip training)')
     parser.add_argument('--encoding_config', type=str, default=None,
                         help='自定义编码配置文件(JSON)，包含 topo/cnn_params/lstm_params/setting；不指定则使用论文固定编码')
-    parser.add_argument('--disable_lba', action='store_true', default=False,
-                        help='Force disable LBA pipeline, run NSGA-II nVITA attack instead')
-    parser.add_argument('--enable_lba', action='store_true', default=False,
-                        help="Force enable LBA pipeline (overrides LBA_CONFIG['enable_lba']=False)")
-    parser.add_argument('--n_max', type=int, default=LBA_CONFIG['n'],
-                        help='Number of perturbations per sample (used by NSGA-II attack)')
-    parser.add_argument('--maxiter', type=int, default=LBA_CONFIG['maxiter'],
-                        help='Maximum generations for NSGA-II attack')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     args = parser.parse_args()
+
+    # 【变长编码】区间合法性校验：n_min 至少为 1，且不得大于 n_max
+    if args.n_min < 1:
+        raise ValueError(f"--n_min={args.n_min} 非法：扰动点数下界至少为 1")
+    if args.n_min > args.n_max:
+        raise ValueError(f"--n_min={args.n_min} 不能大于 --n_max={args.n_max}")
 
     # 加载自定义编码配置（二选一：直接输入编码 or 使用论文固定编码）
     def load_encoding_config(path):
@@ -2885,42 +2433,6 @@ def main():
         print(f"\n>>> 已加载自定义编码配置: {args.encoding_config}")
     else:
         encoding = FIXED_ENCODING
-    
-    # 使用配置文件中的参数作为默认值
-    if args.perturb_mask is None:
-        args.perturb_mask = LBA_CONFIG['perturb_mask']
-    if args.feat_constraint is None:
-        args.feat_constraint = LBA_CONFIG['feature_constraint']
-    
-    # 将二进制掩码转换为特征索引列表
-    def mask_to_features(mask):
-        if not mask or mask == '1111':
-            return None  # 不限制，所有特征都可以扰动
-        features = []
-        # 从左到右对应特征0到特征3
-        for i, c in enumerate(mask):
-            if c == '1':
-                features.append(i)
-        return features  # 空列表表示不允许扰动任何特征
-    
-    args.perturb_features = mask_to_features(args.perturb_mask)
-
-    # ====== LBA 总开关解析 ======
-    # 优先级：命令行显式参数 > LBA_CONFIG['enable_lba'] 配置
-    # --enable_lba：强制启用 LBA（可覆盖配置中的 False）
-    # --disable_lba：强制封存 LBA，仅运行 nVITA/NSGA-II 攻击
-    if args.enable_lba and args.disable_lba:
-        raise ValueError("--enable_lba 与 --disable_lba 不能同时指定，请二选一")
-    if args.enable_lba:
-        lba_disabled = False
-        print(f"\n>>> LBA 开关状态: 启用（--enable_lba 命令行强制覆盖）")
-    elif args.disable_lba:
-        lba_disabled = True
-        print(f"\n>>> LBA 开关状态: 封存（--disable_lba 命令行强制覆盖）")
-    else:
-        lba_disabled = not LBA_CONFIG['enable_lba']
-        state_str = '启用' if LBA_CONFIG['enable_lba'] else '封存'
-        print(f"\n>>> LBA 开关状态: {state_str}（来自 LBA_CONFIG['enable_lba'] 配置）")
 
     # Set seed
     random.seed(args.seed)
@@ -2930,7 +2442,7 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     print(f"\n{'=' * 80}")
-    print("固定编码 MoACB-WSF: 直接构建论文最佳折中模型并执行 LBA 对抗攻击")
+    print("固定编码 MoACB-WSF: 直接构建论文最佳折中模型并执行 NSGA-II 双目标变长稀疏攻击（L0 作为约束）")
     print(f"{'=' * 80}")
     print(f"Device: {DEVICE}")
     print(f"Data file: {args.data_file}")
@@ -2951,7 +2463,8 @@ def main():
     feature_columns = data_result['feature_columns']
 
     # Extract test data for attack evaluation
-    # LBA 数据池 = 验证集(15%) + 测试集(15%)，按时序拼接
+    # 攻击评估数据池 = 验证集(15%) + 测试集(15%)，按时序拼接
+    # （LBA 管线已移除，不再需要为 LBA 训练预留前 adv_cnt 个样本，整个数据池直接用于攻击评估）
     test_loader_for_attack = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False)
     X_test_full, Y_test_full = next(iter(test_loader_for_attack))
     X_test_full = X_test_full.to(DEVICE)
@@ -2962,17 +2475,11 @@ def main():
     X_val_full = X_val_full.to(DEVICE)
     Y_val_full = Y_val_full.to(DEVICE)
 
-    X_lba_pool = torch.cat([X_val_full, X_test_full], dim=0)
-    Y_lba_pool = torch.cat([Y_val_full, Y_test_full], dim=0)
-    # adv_cnt 现完全取自 LBA_CONFIG['adv_cnt']/--adv_cnt（不再是固定的 0.8 比例），防止出现“死配置”；
-    # 仍需保留至少 1 个评估样本，过大时自动限幅并提醒
-    adv_cnt_auto = min(args.adv_cnt, len(X_lba_pool) - 1)
-    if adv_cnt_auto != args.adv_cnt:
-        print(f"\n>>> 警告: --adv_cnt={args.adv_cnt} 超出数据池范围，已自动限幅为 {adv_cnt_auto}")
-    print(f"\n[LBA 数据池] 验证集 {len(X_val_full)} + 测试集 {len(X_test_full)} = 总计 {len(X_lba_pool)} 个样本")
-    print(f"[LBA 数据池] 时序划分：前 {adv_cnt_auto} 个训练 LBA，后 {len(X_lba_pool) - adv_cnt_auto} 个用于评估")
+    X_attack_pool = torch.cat([X_val_full, X_test_full], dim=0)
+    Y_attack_pool = torch.cat([Y_val_full, Y_test_full], dim=0)
+    print(f"\n[攻击数据池] 验证集 {len(X_val_full)} + 测试集 {len(X_test_full)} = 总计 {len(X_attack_pool)} 个样本")
 
-    # ====== 新增: 判断是否触发 load_model 模式 ======
+    # ====== 判断是否触发 load_model 模式 ======
     load_model_mode = args.load_model is not None and os.path.isfile(args.load_model)
     if load_model_mode:
         print(f"\n>>> 检测到 --load_model 路径: {args.load_model}")
@@ -2994,7 +2501,7 @@ def main():
 
         print(f'使用设备: {DEVICE}')
 
-        # ====== 新增: 加载模型或执行 NSGA-II 搜索 + 训练 ======
+        # ====== 加载模型或使用固定编码训练 ======
         if load_model_mode:
             # ---------- 从 checkpoint 加载已训练模型 ----------
             print(f"\n>>> 正在从 checkpoint 加载模型: {args.load_model}")
@@ -3170,7 +2677,7 @@ def main():
 
             test_performance = {'mae': mae_test, 'rmse': rmse_test, 'mape': mape_test}
 
-            # 固定编码模式不绘制 Pareto 前沿相关图像
+            # 固定编码模式不绘制结构搜索 Pareto 前沿相关图像
 
             # 保存结果
             with open(f'{prefix}modeo_cnn_optimization_continuous_lr.pkl', 'wb') as f:
@@ -3192,7 +2699,7 @@ def main():
                     'run_id': run_id + 1,
                 }, f)
 
-            # ====== 新增: 保存模型 checkpoint ======
+            # ====== 保存模型 checkpoint ======
             if args.save_model is not None:
                 save_path = args.save_model
                 os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
@@ -3220,175 +2727,183 @@ def main():
             })
             test_results_df.to_csv(f'{prefix}test_set_wind_speed_predictions.csv', index=False, encoding='utf-8-sig')
 
-            # 固定编码模式不存在 Pareto 前沿，无需保存每代 CSV
-        # ====== 新增: if/else 块结束 ======
+            # 固定编码模式不存在结构搜索 Pareto 前沿，无需保存每代 CSV
+        # ====== if/else 块结束 ======
 
         # ==================== Attack Phase ====================
-        # 当 lba_disabled=True 时：运行 NSGA-II 双目标攻击（跳过 LBA 管线）
-        # 当 lba_disabled=False 且 no_attack=False 时：运行原始 LBA 管线
+        # 只保留 NSGA-II 变长编码双目标（L0 约束）攻击流程（LBA 分支已整体移除）
         if not args.no_attack:
-            if lba_disabled:
-                print(f"\n{'=' * 80}")
-                print(f"开始 NSGA-II 双目标攻击评估 (第 {run_id + 1} 次运行)")
-                print(f"{'=' * 80}")
+            print(f"\n{'=' * 80}")
+            print(f"开始 NSGA-II 双目标变长稀疏攻击评估（L0 作为约束） (第 {run_id + 1} 次运行)")
+            print(f"{'=' * 80}")
 
-                # 评估数据池 = 验证集 + 测试集的后半部分
-                feature_ranges = np.ones(num_features)
-                eval_start = adv_cnt_auto
-                X_eval = X_lba_pool[eval_start:]
-                Y_eval = Y_lba_pool[eval_start:]
+            # 攻击评估数据 = 验证集 + 测试集拼接的完整数据池
+            feature_ranges = np.ones(num_features)
+            X_eval = X_attack_pool
+            Y_eval = Y_attack_pool
 
-                print(f"\nNSGA-II 攻击配置: n_max={args.n_max}, pop_size={args.pop_size}, maxiter={args.maxiter}, beta={args.beta}")
-                print(f"评估样本数: {X_eval.shape[0]}")
+            print(f"\nNSGA-II 攻击配置: 变长编码 n∈[{args.n_min},{args.n_max}]（L0 约束）, "
+                  f"pop_size={args.pop_size}, maxiter={args.maxiter}, beta={args.beta}, "
+                  f"select_mode={args.select_mode}")
+            print(f"双目标（全部最小化）: obj1=扰动L2范数, obj2=-RSE；"
+                  f"n_actual(L0) 为约束变量，要求 ∈[{args.n_min},{args.n_max}]（Deb 约束支配）")
+            print(f"评估样本数: {X_eval.shape[0]}")
 
-                X_adv_nsga2, metrics, all_generation_pareto = run_nsga2_standalone_attack(
-                    model, X_eval, Y_eval, beta=args.beta, n=args.n_max,
-                    maxiter=args.maxiter, pop_size=args.pop_size,
-                    device=DEVICE, feature_ranges=feature_ranges,
-                    feature_constraint=args.feat_constraint,
-                    perturb_features=args.perturb_features,
-                    print_info=True
-                )
+            X_adv_nsga2, metrics, all_generation_pareto = run_nsga2_standalone_attack(
+                model, X_eval, Y_eval, beta=args.beta,
+                n_min=args.n_min, n_max=args.n_max,   # 变长编码：扰动点数上下界
+                maxiter=args.maxiter, pop_size=args.pop_size,
+                device=DEVICE, feature_ranges=feature_ranges,
+                print_info=True,
+                select_mode=args.select_mode,
+                knee_min_rse=args.knee_min_rse,
+                insert_prob=NSGA2_CONFIG['insert_prob'],
+                delete_prob=NSGA2_CONFIG['delete_prob']
+            )
 
-                # 评估攻击效果
-                attack_results = evaluate_attack(
-                    model, X_eval, Y_eval, X_adv_nsga2,
-                    min_speed, max_speed, f"NSGA2 (n_max={args.n_max})", DEVICE
-                )
+            # 评估攻击效果
+            attack_results = evaluate_attack(
+                model, X_eval, Y_eval, X_adv_nsga2,
+                min_speed, max_speed, f"NSGA2 (n in [{args.n_min},{args.n_max}])", DEVICE
+            )
 
-                # 计算 RSE 和平均扰动 L2
-                clean_rmse = attack_results['rmse_clean']
-                adv_rmse = attack_results['rmse_adv']
-                rse = adv_rmse / clean_rmse if clean_rmse > 0 else 0
+            # 计算 RSE 和平均扰动 L2
+            clean_rmse = attack_results['rmse_clean']
+            adv_rmse = attack_results['rmse_adv']
+            rse = adv_rmse / clean_rmse if clean_rmse > 0 else 0
 
-                print(f"\n{'=' * 50}")
-                print(f"NSGA-II 双目标攻击汇总")
-                print(f"{'=' * 50}")
-                print(f"干净预测 RMSE: {clean_rmse:.4f} m/s")
-                print(f"攻击后 RMSE:   {adv_rmse:.4f} m/s")
-                print(f"RSE:            {rse:.4f}")
-                print(f"平均扰动 L2:   {metrics['mean_l2_norm']:.6f}")
-                n_pareto = int(metrics['global_final_pareto_obj'].shape[0]) \
-                    if isinstance(metrics.get('global_final_pareto_obj'), np.ndarray) else 0
-                print(f"全局最终 Pareto 前沿解数量 (跨样本非支配筛选): {n_pareto}")
-                print(f"{'=' * 50}")
+            print(f"\n{'=' * 50}")
+            print(f"NSGA-II 双目标变长攻击汇总（L0 作为约束）")
+            print(f"{'=' * 50}")
+            print(f"干净预测 RMSE: {clean_rmse:.4f} m/s")
+            print(f"攻击后 RMSE:   {adv_rmse:.4f} m/s")
+            print(f"RSE:            {rse:.4f}")
+            print(f"前沿平均扰动 L2:  {metrics['mean_l2_norm']:.6f}")
+            print(f"--- 选中解统计（双目标 + 约束变量） ---")
+            print(f"  obj1 扰动 L2 范数:     {metrics['mean_sel_l2_norm']:.6f}")
+            print(f"  obj2 RSE (-obj2 还原): {metrics['mean_sel_rse']:.4f}")
+            n_tot = len(metrics.get('sel_n_actuals', []))
+            print(f"  n_actual 均值（约束变量，非目标）: {metrics['mean_sel_n_actual']:.3f} "
+                  f"(平均稀疏度即每样本扰动点数)")
+            print(f"  L0 约束 n∈[{args.n_min},{args.n_max}] 满足率: "
+                  f"{metrics['constraint_feasible_cnt']}/{n_tot} "
+                  f"= {metrics['constraint_feasible_rate'] * 100:.1f}%")
+            n_pareto = int(metrics['global_final_pareto_obj'].shape[0]) \
+                if isinstance(metrics.get('global_final_pareto_obj'), np.ndarray) else 0
+            print(f"全局最终 Pareto 前沿解数量 (跨样本二维非支配筛选，n_actual 仅作附带属性): {n_pareto}")
+            print(f"{'=' * 50}")
 
-                # 保存 Pareto 进化图片和数据
-                os.makedirs(f'{OUTPUT_DIR}/run{run_id + 1}', exist_ok=True)
-                pareto_save_dir = f'{OUTPUT_DIR}/run{run_id + 1}'
+            # 保存 Pareto 进化图片和数据
+            os.makedirs(f'{OUTPUT_DIR}/run{run_id + 1}', exist_ok=True)
+            pareto_save_dir = f'{OUTPUT_DIR}/run{run_id + 1}'
 
-                if len(all_generation_pareto) > 0:
-                    last_sample_pareto = all_generation_pareto[-1]['generation_pareto']
-                    if len(last_sample_pareto) > 0:
-                        plot_pareto_evolution(
-                            last_sample_pareto,
-                            n_max=args.n_max,
-                            pop_size=args.pop_size,
-                            save_path=f'{pareto_save_dir}/pareto_evolution.png'
-                        )
-                    # 保存所有样本的 Pareto 数据
-                    with open(f'{pareto_save_dir}/pareto_evolution_data.pkl', 'wb') as f:
-                        pickle.dump(all_generation_pareto, f)
-                    print(f"Pareto 进化数据已保存至: {pareto_save_dir}/pareto_evolution_data.pkl")
-
-                # 保存攻击结果
-                with open(f'{prefix}nsga2_attack_results.pkl', 'wb') as f:
-                    pickle.dump({
-                        'attack_results': attack_results,
-                        'metrics': metrics,
-                        'generation_pareto': all_generation_pareto,
-                        'config': {
-                            'n_max': args.n_max,
-                            'pop_size': args.pop_size,
-                            'maxiter': args.maxiter,
-                            'beta': args.beta,
-                            'feature_constraint': args.feat_constraint,
-                            'perturb_features': args.perturb_features,
-                        },
-                        'run_id': run_id + 1,
-                    }, f)
-                print(f"NSGA2 攻击结果已保存至: {prefix}nsga2_attack_results.pkl")
-            else:
-                print(f"\n{'=' * 80}")
-                print(f"开始 LBA 对抗攻击评估 (第 {run_id + 1} 次运行)")
-                print(f"{'=' * 80}")
-
-                lba_results, lba_model, X_adv_nvita, pareto_artifacts = run_lba_pipeline(
-                    model, X_lba_pool, Y_lba_pool, min_speed, max_speed, DEVICE,
-                    beta=args.beta, n=args.n_perturb,
-                    maxiter=LBA_CONFIG['maxiter'],
-                    pop_size=args.pop_size,
-                    adv_cnt=adv_cnt_auto, lba_epochs=args.lba_epochs,
-                    lba_lr=args.lba_lr, lba_batch_size=LBA_CONFIG['lba_batch_size'],
-                    delta_list=args.delta_list, use_bayesian=args.use_bayesian,
-                    feature_constraint=args.feat_constraint,
-                    perturb_features=args.perturb_features,
-                    print_info=True,
-                    dir_weight=args.dir_weight
-                )
-
-                # Save LBA results
-                with open(f'{prefix}lba_attack_results.pkl', 'wb') as f:
-                    pickle.dump({
-                        'lba_results': lba_results,
-                        'config': LBA_CONFIG,
-                        'feat_constraint': args.feat_constraint,
-                        'run_id': run_id + 1,
-                    }, f)
-                print(f"\nLBA 攻击结果已保存至: {prefix}lba_attack_results.pkl")
-
-                # ====== Pareto 前沿输出（与 NSGA-II 模式对齐：LBA 开启时同样打印）======
-                os.makedirs(f'{OUTPUT_DIR}/run{run_id + 1}', exist_ok=True)
-                pareto_save_dir = f'{OUTPUT_DIR}/run{run_id + 1}'
-
-                baseline_pareto = pareto_artifacts['baseline_eval_generation_pareto']
-                global_front = pareto_artifacts['baseline_eval_metrics'].get(
-                    'global_final_pareto_obj', np.empty((0, 2)))
-
-                # 1) Pareto 进化图（评估子集基线攻击，与 NSGA-II 模式同款）
-                if len(baseline_pareto) > 0:
-                    last_sample_pareto = baseline_pareto[-1]['generation_pareto']
-                    if len(last_sample_pareto) > 0:
-                        plot_pareto_evolution(
-                            last_sample_pareto,
-                            n_max=args.n_perturb,
-                            pop_size=args.pop_size,
-                            save_path=f'{pareto_save_dir}/pareto_evolution.png'
-                        )
-                # 2) 保存所有 Pareto 进化数据（训练子集教师攻击 + 评估子集基线攻击）
-                with open(f'{pareto_save_dir}/pareto_evolution_data.pkl', 'wb') as f:
-                    pickle.dump({
-                        'train_generation_pareto': pareto_artifacts['train_generation_pareto'],
-                        'baseline_eval_generation_pareto': baseline_pareto,
-                    }, f)
-                print(f"Pareto 进化数据已保存至: {pareto_save_dir}/pareto_evolution_data.pkl")
-                # 3) 最终全局 Pareto 前沿 + LBA 学到的攻击模式标注
-                if len(global_front) > 0:
-                    plot_pareto_front_with_lba(
-                        global_front, pareto_artifacts['lba_points'],
-                        save_path=f'{pareto_save_dir}/pareto_front_with_lba.png'
+            if len(all_generation_pareto) > 0:
+                last_sample_pareto = all_generation_pareto[-1]['generation_pareto']
+                if len(last_sample_pareto) > 0:
+                    plot_pareto_evolution(
+                        last_sample_pareto,
+                        n_min=args.n_min,
+                        n_max=args.n_max,
+                        pop_size=args.pop_size,
+                        save_path=f'{pareto_save_dir}/pareto_evolution.png'
                     )
+                # 保存所有样本的 Pareto 数据
+                with open(f'{pareto_save_dir}/pareto_evolution_data.pkl', 'wb') as f:
+                    pickle.dump(all_generation_pareto, f)
+                print(f"Pareto 进化数据已保存至: {pareto_save_dir}/pareto_evolution_data.pkl")
+
+            # ==================== 高级攻击分析：收敛性 / 二维投影 / 样本级可视化 ====================
+            # 全部基于攻击结果数据做后处理（不改动攻击核心逻辑），默认自动执行
+            print(f"\n正在生成高级攻击分析图表（收敛曲线 / 二维投影 / 样本级可视化）...")
+            analysis_data = {
+                'config': {
+                    'n_min': args.n_min, 'n_max': args.n_max,
+                    'pop_size': args.pop_size, 'maxiter': args.maxiter,
+                    'beta': args.beta, 'select_mode': args.select_mode,
+                },
+            }
+
+            # 一、收敛性量化分析（二维 HV / 双目标均值与最优值 / 前沿解数量 / n_actual 约束统计，逐样本计算后跨样本平均）
+            generation_metrics = compute_generation_metrics(all_generation_pareto)
+            if generation_metrics is not None:
+                analysis_data['generation_metrics'] = generation_metrics
+                # 每代 n_actual 均值（constraint variable，非 objective）控制台打印
+                print(f"  每代前沿 n_actual 均值（constraint variable，非 objective）: "
+                      f"{np.round(np.asarray(generation_metrics['n_actual_mean']), 3).tolist()}")
+                plot_hv_convergence(generation_metrics,
+                                    save_path=f'{pareto_save_dir}/hv_convergence.png')
+                plot_objective_evolution(generation_metrics,
+                                         save_path=f'{pareto_save_dir}/objective_evolution.png')
+                plot_pareto_count_evolution(generation_metrics,
+                                            save_path=f'{pareto_save_dir}/pareto_count_evolution.png')
+
+            # 二、最终全局 Pareto 前沿主图（L2 vs -RSE，按 n_actual 着色 + 颜色条；原三张两两投影合并为一张）
+            #     双目标下 n_actual 仅为约束变量，图上以颜色条呈现，不再占据坐标轴
+            global_front = metrics.get('global_final_pareto_obj')
+            if isinstance(global_front, np.ndarray) and global_front.shape[0] > 0:
+                analysis_data['global_final_pareto_obj'] = global_front
+                plot_global_pareto_front(global_front, pareto_save_dir)
+
+            # 三、样本级攻击效果可视化（RSE 中位典型样本对比 + 扰动位置频次热力图）
+            typical_info = plot_sample_attack_compare(
+                model, X_eval, Y_eval, X_adv_nsga2, metrics,
+                min_speed, max_speed, DEVICE,
+                save_path=f'{pareto_save_dir}/sample_attack_compare.png')
+            if typical_info:
+                analysis_data['typical_samples'] = typical_info
+
+            seq_len_eval = X_eval.shape[1]
+            num_features_eval = X_eval.shape[2]
+            analysis_data['perturb_position_freq'] = plot_perturb_position_heatmap(
+                all_generation_pareto, seq_len_eval, num_features_eval, feature_columns,
+                save_path=f'{pareto_save_dir}/perturb_position_heatmap.png')
+
+            # 统一持久化新增统计数据，方便后续复用
+            with open(f'{pareto_save_dir}/analysis_data.pkl', 'wb') as f:
+                pickle.dump(analysis_data, f)
+            print(f"高级攻击分析数据已保存至: {pareto_save_dir}/analysis_data.pkl")
+
+            # 保存攻击结果
+            with open(f'{prefix}nsga2_attack_results.pkl', 'wb') as f:
+                pickle.dump({
+                    'attack_results': attack_results,
+                    'metrics': metrics,
+                    'generation_pareto': all_generation_pareto,
+                    'config': {
+                        'n_min': args.n_min,
+                        'n_max': args.n_max,
+                        'pop_size': args.pop_size,
+                        'maxiter': args.maxiter,
+                        'beta': args.beta,
+                        'select_mode': args.select_mode,
+                        'knee_min_rse': args.knee_min_rse,
+                        'insert_prob': NSGA2_CONFIG['insert_prob'],
+                        'delete_prob': NSGA2_CONFIG['delete_prob'],
+                        'objectives': ['l2_norm', 'neg_rse'],
+                        'constraint': {'type': 'L0_bounds', 'var': 'n_actual',
+                                       'n_min': args.n_min, 'n_max': args.n_max},
+                    },
+                    'run_id': run_id + 1,
+                }, f)
+            print(f"NSGA2 攻击结果已保存至: {prefix}nsga2_attack_results.pkl")
 
         print(f"\n{'=' * 80}")
         print(f"第 {run_id + 1} 次运行全部完成！")
         print(f"输出文件保存至目录: {OUTPUT_DIR}/")
-        print(f"  - 模型优化结果: {prefix}modeo_cnn_optimization_continuous_lr.pkl")
-        print(f"  - 综合报告: {prefix}comprehensive_report.png")
-        print(f"  - 测试集预测: {prefix}test_set_wind_speed_predictions.csv")
+        if not load_model_mode:
+            print(f"  - 模型优化结果: {prefix}modeo_cnn_optimization_continuous_lr.pkl")
+            print(f"  - 综合报告: {prefix}comprehensive_report.png")
+            print(f"  - 测试集预测: {prefix}test_set_wind_speed_predictions.csv")
         if not args.no_attack:
-            if lba_disabled:
-                print(f"  - NSGA2攻击结果: {prefix}nsga2_attack_results.pkl")
-                print(f"  - Pareto进化图: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution.png")
-                print(f"  - Pareto进化数据: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_data.pkl")
-            else:
-                print(f"  - LBA攻击结果: {prefix}lba_attack_results.pkl")
-                print(f"  - Pareto进化图: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution.png")
-                print(f"  - Pareto前沿+LBA攻击模式图: {OUTPUT_DIR}/run{run_id + 1}/pareto_front_with_lba.png")
-                print(f"  - Pareto进化数据: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_data.pkl")
+            print(f"  - NSGA2攻击结果: {prefix}nsga2_attack_results.pkl")
+            print(f"  - Pareto进化图: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution.png")
+            print(f"  - Pareto进化数据: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_data.pkl")
+            print(f"  - 高级分析图(HV收敛/双目标进化/前沿数量/主Pareto图/样本对比/热力图): {OUTPUT_DIR}/run{run_id + 1}/")
+            print(f"  - 高级分析数据: {OUTPUT_DIR}/run{run_id + 1}/analysis_data.pkl")
         print(f"{'=' * 80}")
 
     print(f"\n{'#' * 80}")
-    print(f"所有 {NUM_RUNS} 次独立运行已完成！")
+    print(f"所有 {actual_num_runs} 次独立运行已完成！")
     print(f"{'#' * 80}")
 
 

@@ -4,26 +4,44 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="8fde5bc4-32b1-454e-94c2-d096a9bd14c3" name="更改" comment="8.24add">
-      <change afterPath="$PROJECT_DIR$/output/run1/pareto_evolution.png" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/output/run1/pareto_evolution_data.pkl" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/output/run1/pareto_front_with_lba.png" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/output/run1_nsga2_attack_results.pkl" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/verify_samoo_ops.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/MarsCodeWorkspaceAppSettings.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/MarsCodeWorkspaceAppSettings.xml" afterDir="false" />
+    <list default="true" id="8fde5bc4-32b1-454e-94c2-d096a9bd14c3" name="更改" comment="2026.9.4add">
+      <change afterPath="$PROJECT_DIR$/_test_biobj_attack.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/_smoke/pareto_evolution.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/_smoke/pareto_evolution_data.pkl" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/_test_biobj/hv_convergence.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/_test_biobj/objective_evolution.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/_test_biobj/pareto_count_evolution.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/_test_biobj/pareto_evolution.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/_test_biobj/pareto_l2_rse.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_attack_effectiveness.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_clean_vs_adv_predictions.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_lba_training_loss.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_perturbation_analysis.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_perturbation_sign_distribution.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/analysis_data.pkl" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/hv_convergence.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/objective_evolution.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/pareto_count_evolution.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/pareto_l2_rse.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/pareto_n_l2.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/pareto_n_rse.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/perturb_position_heatmap.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1/sample_attack_compare.png" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/LBA-MOACB-WSF-FixedEncoding.py" beforeDir="false" afterPath="$PROJECT_DIR$/LBA-MOACB-WSF-FixedEncoding.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/LBA-MOACB-WSF.py" beforeDir="false" afterPath="$PROJECT_DIR$/LBA-MOACB-WSF.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/output/LBA_models/lba_model_moacb_wsf.pt" beforeDir="false" afterPath="$PROJECT_DIR$/output/LBA_models/lba_model_moacb_wsf.pt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_attack_effectiveness.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_attack_effectiveness.png" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_clean_vs_adv_predictions.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_clean_vs_adv_predictions.png" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_lba_training_loss.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_lba_training_loss.png" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_perturbation_analysis.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_perturbation_analysis.png" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_perturbation_sign_distribution.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_perturbation_sign_distribution.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/output/run1/pareto_evolution.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1/pareto_evolution.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/output/run1/pareto_evolution_data.pkl" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1/pareto_evolution_data.pkl" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/output/run1/pareto_front_with_lba.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1/pareto_front_with_lba.png" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/output/run1_comprehensive_report.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1_comprehensive_report.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/output/run1_feature_weights.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1_feature_weights.png" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/output/run1_lba_attack_results.pkl" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1_lba_attack_results.pkl" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/output/run1_modeo_cnn_optimization_continuous_lr.pkl" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1_modeo_cnn_optimization_continuous_lr.pkl" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/output/run1_nsga2_attack_results.pkl" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1_nsga2_attack_results.pkl" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/output/run1_test_set_wind_speed_predictions.csv" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1_test_set_wind_speed_predictions.csv" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/output/run1_training_loss_curve.png" beforeDir="false" afterPath="$PROJECT_DIR$/output/run1_training_loss_curve.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/verify_samoo_ops.py" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -126,7 +144,10 @@
       <workItem from="1786341111612" duration="37526000" />
       <workItem from="1786496264828" duration="31745000" />
       <workItem from="1787191520348" duration="47857000" />
-      <workItem from="1788429590619" duration="17135000" />
+      <workItem from="1788429590619" duration="29699000" />
+      <workItem from="1788682016675" duration="12872000" />
+      <workItem from="1788786322656" duration="3052000" />
+      <workItem from="1788789759546" duration="17460000" />
     </task>
     <task id="LOCAL-00001" summary="111">
       <option name="closed" value="true" />
@@ -192,7 +213,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787540955858</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="8.24add">
+      <option name="closed" value="true" />
+      <created>1788512226544</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1788512226544</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -218,7 +247,7 @@
     <option name="LAST_COMMIT_MESSAGE" value="8.24add" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$LBA_MOACB_WSF_FixedEncoding.coverage" NAME="LBA-MOACB-WSF-FixedEncoding 覆盖结果" MODIFIED="1788511968671" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$LBA_MOACB_WSF.coverage" NAME="LBA-MOACB-WSF 覆盖结果" MODIFIED="1786072090001" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$LBA_MOACB_WSF_FixedEncoding.coverage" NAME="LBA-MOACB-WSF-FixedEncoding 覆盖结果" MODIFIED="1788831961385" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$LBA_MOACB_WSF.coverage" NAME="LBA-MOACB-WSF 覆盖结果" MODIFIED="1788845849015" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>

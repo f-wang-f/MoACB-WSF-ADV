@@ -58,7 +58,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 FILENAME = 'winddata.xlsx'
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
-SEQUENCE_LENGTH =10
+SEQUENCE_LENGTH =100
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -71,8 +71,8 @@ NUM_LSTM_MODULES = 2
 TOPO_BITS_LENGTH = NUM_MODULES * (NUM_MODULES - 1) // 2
 INDIVIDUAL_LENGTH = TOPO_BITS_LENGTH + 5 * NUM_CNN_MODULES + 5 * NUM_LSTM_MODULES + 4
 
-POP_SIZE = 20
-MAX_GEN = 30
+POP_SIZE =20
+MAX_GEN = 40
 NUM_RUNS = 1
 MUTATION_PROB = 0.6
 CROSSOVER_PROB = 0.8
@@ -119,7 +119,7 @@ LBA_CONFIG = {
     'lba_batch_size': 8,  # LBA model batch size
     'delta_list': [0.75, 1.0, 1.5, 1.75],  # LBA attack scaling factors (原论文 δ)
     'use_bayesian': True,   # 启用贝叶斯卷积层，提升泛化性和不确定性估计
-    'perturb_mask': '0000',  # 二进制掩码表示是否扰动特征，1表示扰动，0表示不扰动
+    'perturb_mask': '1111',  # 二进制掩码表示是否扰动特征，1表示扰动，0表示不扰动
                              # 例如'0010'表示只扰动第3个特征(0-based索引2)
                              # '1111'表示扰动所有4个特征
     'feature_constraint': None,  # 扰动特征数量约束 (None=不限制, 整数=限定特征数)
