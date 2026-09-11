@@ -2,9 +2,9 @@
 MoACB-WSF with Fixed Manual Encoding (NSGA-II 变长编码双目标稀疏攻击版，L0 作为约束)
 =======================================================================
 基于论文给出的最佳折中混合编码向量直接构建 CNN-BiLSTM 风速预测模型，
-跳过 NSGA-II 结构搜索，直接训练目标模型并执行 nVITA/NSGA-II 稀疏对抗攻击评估。
+训练目标模型后执行 nVITA/NSGA-II 稀疏对抗攻击评估。
 
-本版本相对 LBA 版的三点核心改动：
+本版本相对 LBA 版的核心改动：
 1.【删除 LBA】完整移除 LBA 学习式攻击管线：LBA_Dataset / BayesianConv1d / BayesianLinear /
    SEBlock / CNN_LBA_Model 等类，get_sensitive_point_and_value / get_LBA_Dataset /
    build_sensitive_labels / print_sign_distribution / train_lba_model / calc_sensitive_point_ar /
@@ -24,11 +24,24 @@ MoACB-WSF with Fixed Manual Encoding (NSGA-II 变长编码双目标稀疏攻击�
    非支配排序采用 Deb 约束支配（可行优先 → 二维目标支配 → 违约度比较）。
    删除冗余的第三目标维度可避免第一前沿过早吞没整个种群，拥挤距离 / 锦标赛 /
    环境选择均按 2 个目标计算。
-4.【分析扩展】攻击高级分析模块（SECTION 7.5）：二维超体积 HV 逐代收敛曲线、双目标均值/最优值
-   进化曲线（每代 n_actual 均值作为约束变量统计一并输出）、每代前沿解数量曲线、
-   全局最终前沿主 Pareto 图（L2 vs -RSE，按 n_actual 着色 + 颜色条）、
+4.【分析扩展】攻击高级分析模块（SECTION 5 / 5.5）：二维超体积 HV 逐代收敛曲线、双目标均值/最优值
+   进化曲线（每代 n_actual 均值作为约束变量统计一并输出）、单样本全代际 Pareto 进化散点图、
+   关键代数 Pareto 前沿对比图（跨样本聚合，首代/中间代/末代各一条带连线曲线，
+   展示前沿随代数向左下收敛）、
+   全局最终前沿主 Pareto 图（L2 vs -RSE 双目标曲线）、
    RSE 中位典型样本攻击前后预测对比、扰动位置 (t,f) 频次热力图；图片输出到 output/run{id}/，
    统计数据统一持久化到 output/run{id}/analysis_data.pkl。
+   【三目标遗留清理】已删除「每代前沿解数量曲线」（三目标下 front0 迅速吞没种群才需监控
+   前沿规模，现仅作为统计量保留在 generation_metrics）与两张图上的 n_actual 颜色条
+   （n_actual 是约束变量而非目标维，不再占据图形编码通道）。
+5.【删除结构搜索】MoACB-WSF 的「模型自动设计」部分已整体移除，本文件只保留「输入编码 → 具体模型」链路：
+   删除 initialize_individual / initialize_population / generate_valid_topology /
+   variable_length_mutation / crossover_population（随机种群与架构进化算子）、
+   evaluate_individual / evaluate_population（逐个体训练一遍模型的 NAS 适应度评估）、
+   以及 NAS 版 fast_non_dominated_sort / crowding_distance / tournament_selection /
+   environmental_selection（攻击所需的约束支配排序由 NVITA_NSGA2 类内部方法独立实现）。
+   保留 encode_individual / decode_individual / decode_hyperparams / is_valid_individual
+   作为编码向量与模型结构/超参数之间的转换与合法性校验层，SECTION 4 起的章节号相应前移。
 
 原文件 LBA-MOACB-WSF.py 完全保留，两个文件并存。
 """
@@ -53,7 +66,6 @@ import json
 import random
 import time
 import warnings
-import traceback
 import pickle
 import argparse
 from pathlib import Path
@@ -86,33 +98,28 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 FILENAME = 'winddata.xlsx'
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
-SEQUENCE_LENGTH =100
+SEQUENCE_LENGTH =20
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 MIN_SAMPLES = 100
 
-NUM_FEATURES = len(FEATURE_COLUMNS)
+# 编码向量描述的网络结构规模（HybridCNNBiLSTM 组网与 decode_individual 解码共用）
 NUM_MODULES = 5
 NUM_CNN_MODULES = 3
 NUM_LSTM_MODULES = 2
 TOPO_BITS_LENGTH = NUM_MODULES * (NUM_MODULES - 1) // 2
-INDIVIDUAL_LENGTH = TOPO_BITS_LENGTH + 5 * NUM_CNN_MODULES + 5 * NUM_LSTM_MODULES + 4
 
-POP_SIZE = 2
-MAX_GEN = 1
+# 固定编码模型的训练/评估超参数
+# 【结构搜索代码已删除】原专用常量 POP_SIZE / MAX_GEN / MUTATION_PROB / CROSSOVER_PROB /
+# EVAL_EPOCHS / EVAL_PATIENCE / MAX_MODEL_SIZE / INDIVIDUAL_LENGTH / NUM_FEATURES 一并移除
 NUM_RUNS = 1
-MUTATION_PROB = 0.6
-CROSSOVER_PROB = 0.8
 LAMBDA_REG = 1e-4
-
-EVAL_EPOCHS = 20
-EVAL_PATIENCE = 5
 FINAL_EPOCHS = 200
 FINAL_PATIENCE = 20
 GRADIENT_CLIP = 1.0
-MAX_MODEL_SIZE = 1e7
 
+# 编码位的取值区间：decode_individual 解码时的越界钳制范围
 KNUM_RANGE = (0, 7)
 KSIZE_RANGE = (0, 3)
 KACT_RANGE = (0, 7)
@@ -123,11 +130,7 @@ OPT_RANGE = (0, 3)
 LR_RANGE = (0.0001, 0.01)
 REG_RANGE = (0, 3)
 
-ACTIVATION_MAP = {
-    0: 'Softplus', 1: 'Softsign', 2: 'ELU', 3: 'Softmax',
-    4: 'Sigmoid', 5: 'Tanh', 6: 'ReLU', 7: 'Identity'
-}
-
+# 激活函数编码由 HybridCNNBiLSTM 内部的 act_map 直接构建，无需额外字符串映射表
 OPTIMIZER_MAP = {0: 'SGD', 1: 'Adam', 2: 'AdaDelta', 3: 'RMSprop'}
 REGULARIZER_MAP = {0: None, 1: 'L1', 2: 'L2', 3: 'L1L2'}
 BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
@@ -138,31 +141,32 @@ BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 # 【变长编码】n_min / n_max 取代原固定 n：每个个体独立采样扰动点数 n ∈ [n_min, n_max]
 NSGA2_CONFIG = {
     'n_min': 1,      # 变长编码：扰动点数下界（时序稀疏攻击场景默认 1）
-    'n_max': 6,      # 变长编码：扰动点数上界（时序稀疏攻击场景默认 6）
+    'n_max': 10,      # 变长编码：扰动点数上界（时序稀疏攻击场景默认 6）
     'beta': 0.3,     # nVITA perturbation budget factor (原论文 β)
-    'maxiter': 20,   # NSGA-II max generations
-    'pop_size': 40,  # NSGA-II population size（增大可提升搜索覆盖度，但每代计算量线性增加）
+    'maxiter': 10,   # NSGA-II max generations
+    'pop_size': 10,  # NSGA-II population size（增大可提升搜索覆盖度，但每代计算量线性增加）
     'insert_prob': 0.1,  # 变长编码：插入变异概率（n+1）
-    'delete_prob': 0.1,  # 变长编码：删除变异概率（n-1）
+    'delete_prob': 0.2,  # 变长编码：删除变异概率（n-1）【方案A】0.1→0.2：加速不可行解(n<n_min)在种群中积累，使 Deb 约束支配更快发挥作用
     'select_mode': 'knee',   # 最终解选择策略：'knee'=归一化折中膝点 / 'max_rse'=攻击强度上界端点
-    'knee_min_rse': 2.0,     # 膝点有效性下界：仅 RSE>=该值的前沿点可作膝点候选
+    'knee_min_rse': 1,     # 膝点有效性下界：仅 RSE>=该值的前沿点可作膝点候选
+    'num_eval_samples': None, # 参加 NSGA-II 评估的样本数量（None 或 <=0 表示使用数据池全部样本，正整数则从数据池头部截取该数量的样本）
 }
 
 # ==================== FIXED MANUAL ENCODING FROM PAPER ====================
 # 论文表 "BEST TRADE-OFF HYBRID ENCODING VECTORS OBTAINED BY THE PROPOSED MoACB-WSF"
 # Dataset: Sotavento 10-min Dataset
 FIXED_ENCODING = {
-    'topo': [1, 1, 0, 0, 0, 0, 1, 1, 0, 0],
+    'topo': [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
     'cnn_params': [
-        [0, 0, 2, 0, 3],   # CNN module 0
-        [0, 3, 7, 0, 2],   # CNN module 1
-        [2, 0, 7, 2, 2],   # CNN module 2
+        [0, 0, 1, 0, 1],   # CNN module 0
+        [1, 3, 4, 1, 1],   # CNN module 1
+        [3, 0, 3, 1, 1],   # CNN module 2
     ],
     'lstm_params': [
-        [0, 0, 4, 1, 2],   # BiLSTM module 0 (module index 3)
-        [0, 0, 3, 1, 3],   # BiLSTM module 1 (module index 4)
+        [0, 0, 7, 1, 0],   # BiLSTM module 0 (module index 3)
+        [0, 0, 0, 1, 2],   # BiLSTM module 1 (module index 4)
     ],
-    'setting': [0, 1, 0.0005761369, 0],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
+    'setting': [0, 0, 0.0072, 3],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
 }
 
 
@@ -379,7 +383,7 @@ class HybridCNNBiLSTM(nn.Module):
 
 
 # =============================================================================
-# SECTION 3: NSGA-II ENCODING AND DECODING
+# SECTION 3: 混合编码向量的编码 / 解码 / 合法性校验（输入编码 → 具体模型）
 # =============================================================================
 
 def encode_individual(topo, cnn_params, lstm_params, setting):
@@ -429,22 +433,6 @@ def decode_hyperparams(setting):
     return BATCH_SIZE_MAP[bs], lr, OPTIMIZER_MAP[opt], REGULARIZER_MAP[reg]
 
 
-def initialize_individual():
-    topo = [np.random.randint(0, 2) for _ in range(TOPO_BITS_LENGTH)]
-    cnn_params = [[np.random.randint(b[0], b[1] + 1) for b in [KNUM_RANGE, KSIZE_RANGE, KACT_RANGE, PT_RANGE, PS_RANGE]]
-                  for _ in range(NUM_CNN_MODULES)]
-    lstm_params = [
-        [np.random.randint(b[0], b[1] + 1) for b in [KNUM_RANGE, KSIZE_RANGE, KACT_RANGE, PT_RANGE, PS_RANGE]]
-        for _ in range(NUM_LSTM_MODULES)]
-    setting = [
-        np.random.randint(BS_RANGE[0], BS_RANGE[1] + 1),
-        np.random.randint(OPT_RANGE[0], OPT_RANGE[1] + 1),
-        np.random.uniform(LR_RANGE[0], LR_RANGE[1]),
-        np.random.randint(REG_RANGE[0], REG_RANGE[1] + 1)
-    ]
-    return encode_individual(topo, cnn_params, lstm_params, setting)
-
-
 def is_valid_individual(individual):
     try:
         topo, _, _, _ = decode_individual(individual)
@@ -464,422 +452,8 @@ def is_valid_individual(individual):
         return False
 
 
-def initialize_population(pop_size, train_dataset):
-    population = []
-    attempts = 0
-    max_attempts = pop_size * 100
-    while len(population) < pop_size and attempts < max_attempts:
-        ind = initialize_individual()
-        if is_valid_individual(ind):
-            try:
-                _, _, _, setting = decode_individual(ind)
-                batch_size, _, _, _ = decode_hyperparams(setting)
-                if batch_size <= len(train_dataset):
-                    population.append(ind)
-            except:
-                pass
-        attempts += 1
-    if len(population) < pop_size:
-        raise ValueError(f"初始化失败:仅生成{len(population)}/{pop_size}个有效个体")
-    return population
-
-
-def generate_valid_topology():
-    while True:
-        topo = [np.random.randint(0, 2) for _ in range(TOPO_BITS_LENGTH)]
-        valid = True
-        for i in range(1, NUM_MODULES):
-            num_incoming = 0
-            k = 0
-            for ii in range(NUM_MODULES):
-                for jj in range(ii + 1, NUM_MODULES):
-                    if jj == i and topo[k] == 1:
-                        num_incoming += 1
-                    k += 1
-            if num_incoming == 0:
-                valid = False
-                break
-        if valid:
-            return topo
-
-
-def variable_length_mutation(individual):
-    topo, cnn_params, lstm_params, setting = decode_individual(individual)
-    max_attempts = 100
-    attempts = 0
-
-    while attempts < max_attempts:
-        mutation_region = np.random.choice([0, 1, 2])
-        new_topo = topo.copy()
-        new_cnn_params = [p.copy() for p in cnn_params]
-        new_lstm_params = [p.copy() for p in lstm_params]
-        new_setting = setting.copy()
-        mutated = False
-
-        if mutation_region == 0:
-            bits_length = len(topo)
-            while True:
-                candidate_topo = [np.random.randint(0, 2) for _ in range(bits_length)]
-                if candidate_topo != topo:
-                    temp_ind = encode_individual(candidate_topo, new_cnn_params, new_lstm_params, new_setting)
-                    if is_valid_individual(temp_ind):
-                        new_topo = candidate_topo
-                        mutated = True
-                        break
-
-        elif mutation_region == 1:
-            module_type = np.random.choice([0, 1])
-            if module_type == 0:
-                module_idx = np.random.randint(0, NUM_CNN_MODULES)
-                param_idx = np.random.randint(0, 5)
-                bounds = [KNUM_RANGE, KSIZE_RANGE, KACT_RANGE, PT_RANGE, PS_RANGE][param_idx]
-                original_val = new_cnn_params[module_idx][param_idx]
-                candidate_vals = [v for v in range(bounds[0], bounds[1] + 1) if v != original_val]
-                if candidate_vals:
-                    new_cnn_params[module_idx][param_idx] = np.random.choice(candidate_vals)
-                    mutated = True
-            else:
-                module_idx = np.random.randint(0, NUM_LSTM_MODULES)
-                param_idx = np.random.randint(0, 5)
-                bounds = [KNUM_RANGE, KSIZE_RANGE, KACT_RANGE, PT_RANGE, PS_RANGE][param_idx]
-                original_val = new_lstm_params[module_idx][param_idx]
-                candidate_vals = [v for v in range(bounds[0], bounds[1] + 1) if v != original_val]
-                if candidate_vals:
-                    new_lstm_params[module_idx][param_idx] = np.random.choice(candidate_vals)
-                    mutated = True
-
-        elif mutation_region == 2:
-            param_idx = np.random.randint(0, 4)
-            original_val = new_setting[param_idx]
-            if param_idx == 2:
-                min_val, max_val = LR_RANGE
-                while True:
-                    new_val = np.random.uniform(min_val, max_val)
-                    if abs(new_val - original_val) > 0.00001:
-                        new_setting[param_idx] = new_val
-                        mutated = True
-                        break
-            else:
-                bounds = [BS_RANGE, OPT_RANGE, LR_RANGE, REG_RANGE][param_idx]
-                candidate_vals = [v for v in range(int(bounds[0]), int(bounds[1]) + 1) if v != original_val]
-                if candidate_vals:
-                    new_setting[param_idx] = np.random.choice(candidate_vals)
-                    mutated = True
-
-        if mutated:
-            new_individual = encode_individual(new_topo, new_cnn_params, new_lstm_params, new_setting)
-            if not np.array_equal(new_individual, individual) and is_valid_individual(new_individual):
-                return new_individual
-        attempts += 1
-    return individual.copy()
-
-
-def crossover_population(mating_pool):
-    offspring = []
-    pop_size = len(mating_pool)
-    L = INDIVIDUAL_LENGTH
-    L_t = TOPO_BITS_LENGTH
-
-    for i in range(0, pop_size, 2):
-        if i + 1 < pop_size:
-            par1 = mating_pool[i]
-            par2 = mating_pool[i + 1]
-            if np.random.random() < CROSSOVER_PROB:
-                k = np.random.randint(0, L)
-                if k < L_t:
-                    child1 = par1.copy()
-                    child2 = par2.copy()
-                    child1[:L_t] = generate_valid_topology()
-                    child2[:L_t] = generate_valid_topology()
-                    offspring.append(child1)
-                    offspring.append(child2)
-                else:
-                    child1 = np.concatenate([par1[:k], par2[k:]])
-                    child2 = np.concatenate([par2[:k], par1[k:]])
-                    offspring.append(child1)
-                    offspring.append(child2)
-            else:
-                offspring.append(par1.copy())
-                offspring.append(par2.copy())
-        else:
-            offspring.append(mating_pool[i].copy())
-    return offspring
-
-
 # =============================================================================
-# SECTION 4: MODEL EVALUATION
-# =============================================================================
-
-def evaluate_individual(individual, train_dataset, val_dataset, min_speed, max_speed, num_features, sequence_length,
-                        device, epochs=EVAL_EPOCHS):
-    try:
-        topo, cnn_params, lstm_params, setting = decode_individual(individual)
-        batch_size, learn_rate, opt_type, reg_type = decode_hyperparams(setting)
-
-        model = HybridCNNBiLSTM(topo, cnn_params, lstm_params, num_features, sequence_length).to(device)
-        model_size = sum(p.numel() for p in model.parameters())
-        if model_size > MAX_MODEL_SIZE:
-            raise ValueError(f"模型过大: {model_size} 参数")
-
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size)
-        criterion = nn.MSELoss()
-
-        if opt_type == 'Adam':
-            optimizer = optim.Adam(model.parameters(), lr=learn_rate)
-        elif opt_type == 'SGD':
-            optimizer = optim.SGD(model.parameters(), lr=learn_rate, momentum=0.9)
-        elif opt_type == 'RMSprop':
-            optimizer = optim.RMSprop(model.parameters(), lr=learn_rate)
-        else:
-            optimizer = optim.Adadelta(model.parameters(), lr=learn_rate)
-
-        best_val_loss = float('inf')
-        patience_counter = 0
-
-        for epoch in range(epochs):
-            model.train()
-            for inputs, targets in train_loader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
-
-                if reg_type is not None:
-                    l1_penalty = torch.tensor(0., device=device)
-                    l2_penalty = torch.tensor(0., device=device)
-                    for name, param in model.named_parameters():
-                        if 'bias' in name or 'bn' in name:
-                            continue
-                        if reg_type in ['L1', 'L1L2']:
-                            l1_penalty += torch.norm(param, 1)
-                        if reg_type in ['L2', 'L1L2']:
-                            l2_penalty += torch.norm(param, 2)
-                    loss += LAMBDA_REG * (l1_penalty + l2_penalty)
-
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRADIENT_CLIP)
-                optimizer.step()
-
-            model.eval()
-            val_loss = 0
-            val_samples = 0
-            with torch.no_grad():
-                for inputs, targets in val_loader:
-                    inputs, targets = inputs.to(device), targets.to(device)
-                    outputs = model(inputs)
-                    batch_loss = criterion(outputs, targets).item() * inputs.size(0)
-                    val_loss += batch_loss
-                    val_samples += inputs.size(0)
-            if val_samples > 0:
-                val_loss /= val_samples
-
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-            if patience_counter >= EVAL_PATIENCE:
-                break
-
-        model.eval()
-        all_targets, all_outputs = [], []
-        with torch.no_grad():
-            for inputs, targets in val_loader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                outputs = model(inputs)
-                all_targets.extend(targets.cpu().numpy())
-                all_outputs.extend(outputs.cpu().numpy())
-
-        if not all_targets or not all_outputs:
-            raise ValueError("没有有效的预测结果")
-
-        all_targets = np.array(all_targets) * (max_speed - min_speed) + min_speed
-        all_outputs = np.array(all_outputs) * (max_speed - min_speed) + min_speed
-        rmse = np.sqrt(mean_squared_error(all_targets, all_outputs))
-        if np.isnan(rmse) or np.isinf(rmse):
-            raise ValueError(f"无效的RMSE值: {rmse}")
-
-        complexity = sum(p.numel() for p in model.parameters())
-        return rmse, complexity
-
-    except Exception as e:
-        print(f"\n评估失败 - 个体ID: {id(individual)}")
-        print(f"错误类型: {type(e).__name__}")
-        print(f"错误消息: {e}")
-        traceback.print_exc()
-        return float('inf'), float('inf')
-
-
-def evaluate_population(population, train_dataset, val_dataset, min_speed, max_speed, num_features, sequence_length,
-                        device):
-    performance, complexity = [], []
-    for i, ind in enumerate(population):
-        print(f"  评估个体 {i + 1}/{len(population)}...")
-        rmse, comp = evaluate_individual(ind, train_dataset, val_dataset, min_speed, max_speed,
-                                         num_features, sequence_length, device)
-        performance.append(rmse)
-        complexity.append(comp)
-    return np.array(performance), np.array(complexity)
-
-
-# =============================================================================
-# SECTION 5: NSGA-II ALGORITHM
-# =============================================================================
-
-def fast_non_dominated_sort(performance, complexity):
-    pop_size = len(performance)
-    fronts = []
-    rank = np.zeros(pop_size, dtype=int)
-    domination_count = np.zeros(pop_size, dtype=int)
-    dominated_solutions = [[] for _ in range(pop_size)]
-    valid_mask = np.isfinite(performance) & np.isfinite(complexity)
-
-    for i in range(pop_size):
-        if not valid_mask[i]:
-            continue
-        for j in range(pop_size):
-            if i == j or not valid_mask[j]:
-                continue
-            if (performance[i] <= performance[j] and complexity[i] <= complexity[j]) and \
-                    (performance[i] < performance[j] or complexity[i] < complexity[j]):
-                dominated_solutions[i].append(j)
-            elif (performance[j] <= performance[i] and complexity[j] <= complexity[i]) and \
-                    (performance[j] < performance[i] or complexity[j] < complexity[i]):
-                domination_count[i] += 1
-
-    current_front = np.where((domination_count == 0) & valid_mask)[0]
-    if len(current_front) == 0:
-        valid_indices = np.where(valid_mask)[0]
-        current_front = valid_indices[:1] if len(valid_indices) > 0 else np.array([0])
-
-    fronts.append(current_front)
-    rank[current_front] = 0
-    front_idx = 1
-
-    while len(fronts[-1]) > 0:
-        next_front = []
-        for i in fronts[-1]:
-            for j in dominated_solutions[i]:
-                domination_count[j] -= 1
-                if domination_count[j] == 0:
-                    next_front.append(j)
-                    rank[j] = front_idx
-        if next_front:
-            fronts.append(np.array(next_front))
-        else:
-            break
-        front_idx += 1
-
-    rank[~valid_mask] = front_idx + 1
-    return fronts, rank
-
-
-def crowding_distance(performance, complexity, fronts):
-    pop_size = len(performance)
-    distance = np.zeros(pop_size)
-
-    for front in fronts:
-        if len(front) <= 2:
-            distance[front] = np.inf if len(front) == 2 else 0
-            continue
-
-        valid_mask = np.isfinite(performance[front]) & np.isfinite(complexity[front])
-        if not valid_mask.any():
-            continue
-
-        front_valid = front[valid_mask]
-        sorted_perf_idx = np.argsort(performance[front_valid])
-        distance[front_valid[sorted_perf_idx[0]]] = np.inf
-        distance[front_valid[sorted_perf_idx[-1]]] = np.inf
-
-        sorted_comp_idx = np.argsort(complexity[front_valid])
-        distance[front_valid[sorted_comp_idx[0]]] = np.inf
-        distance[front_valid[sorted_comp_idx[-1]]] = np.inf
-
-        perf_range = performance[front_valid[sorted_perf_idx[-1]]] - performance[front_valid[sorted_perf_idx[0]]]
-        comp_range = complexity[front_valid[sorted_comp_idx[-1]]] - complexity[front_valid[sorted_comp_idx[0]]]
-
-        if perf_range > 0:
-            for i in range(1, len(front_valid) - 1):
-                idx = sorted_perf_idx[i]
-                prev_idx = sorted_perf_idx[i - 1]
-                next_idx = sorted_perf_idx[i + 1]
-                distance[front_valid[idx]] += (performance[front_valid[next_idx]] - performance[
-                    front_valid[prev_idx]]) / perf_range
-
-        if comp_range > 0:
-            for i in range(1, len(front_valid) - 1):
-                idx = sorted_comp_idx[i]
-                prev_idx = sorted_comp_idx[i - 1]
-                next_idx = sorted_comp_idx[i + 1]
-                distance[front_valid[idx]] += (complexity[front_valid[next_idx]] - complexity[
-                    front_valid[prev_idx]]) / comp_range
-
-    return distance
-
-
-def tournament_selection(population, rank, distance, pop_size):
-    mating_pool = []
-    pop_size_actual = len(population)
-    for _ in range(pop_size):
-        idx1, idx2 = np.random.randint(0, pop_size_actual, 2)
-        if not np.isfinite(rank[idx1]): rank[idx1] = 1e6
-        if not np.isfinite(rank[idx2]): rank[idx2] = 1e6
-        if not np.isfinite(distance[idx1]): distance[idx1] = 0
-        if not np.isfinite(distance[idx2]): distance[idx2] = 0
-
-        if rank[idx1] < rank[idx2] or (rank[idx1] == rank[idx2] and distance[idx1] > distance[idx2]):
-            mating_pool.append(population[idx1].copy())
-        else:
-            mating_pool.append(population[idx2].copy())
-    return mating_pool
-
-
-def environmental_selection(combined_pop, combined_perf, combined_complex, combined_rank, combined_dist, pop_size):
-    sorted_idx = np.argsort(combined_rank)
-    combined_pop = [combined_pop[i] for i in sorted_idx]
-    combined_perf = combined_perf[sorted_idx]
-    combined_complex = combined_complex[sorted_idx]
-    combined_rank = combined_rank[sorted_idx]
-    combined_dist = combined_dist[sorted_idx]
-
-    new_pop, new_perf, new_complex = [], [], []
-    current_size = 0
-
-    for rank_val in np.unique(combined_rank):
-        if current_size >= pop_size:
-            break
-        mask = combined_rank == rank_val
-        front_pop = [combined_pop[i] for i in range(len(combined_pop)) if mask[i]]
-        front_perf = combined_perf[mask]
-        front_complex = combined_complex[mask]
-        front_dist = combined_dist[mask]
-
-        if current_size + len(front_pop) <= pop_size:
-            new_pop.extend(front_pop)
-            new_perf.extend(front_perf)
-            new_complex.extend(front_complex)
-            current_size += len(front_pop)
-        else:
-            remaining = pop_size - current_size
-            valid_dist = np.isfinite(front_dist)
-            if not valid_dist.any():
-                selected = np.random.choice(len(front_pop), remaining, replace=False)
-            else:
-                sorted_dist_idx = np.argsort(front_dist[valid_dist])[::-1]
-                selected = np.where(valid_dist)[0][sorted_dist_idx[:remaining]]
-            new_pop.extend([front_pop[i] for i in selected])
-            new_perf.extend(front_perf[selected])
-            new_complex.extend(front_complex[selected])
-            current_size = pop_size
-
-    return new_pop, np.array(new_perf), np.array(new_complex)
-
-
-
-# =============================================================================
-# SECTION 6: NVITA_NSGA2 - NSGA-II 变长编码双目标稀疏对抗攻击（L0 作为约束）
+# SECTION 4: NVITA_NSGA2 - NSGA-II 变长编码双目标稀疏对抗攻击（L0 作为约束）
 # =============================================================================
 # 【双目标】基于 NSGA-II 的 nVITA 稀疏黑盒攻击，同时优化两个目标（全部最小化）:
 #   目标1: 扰动 L2 范数——值越小，扰动越隐蔽、越难检测
@@ -934,6 +508,14 @@ class NVITA_NSGA2:
         self.insert_prob = insert_prob      # 插入变异概率：随机新增一个三元组，n+1
         self.delete_prob = delete_prob      # 删除变异概率：随机删除一个三元组，n-1
 
+        # ====== 【查询计数 / clean 缓存】（第8点：clean 每样本只查一次并缓存）======
+        self.query_count = 0                 # 当前样本累计模型前向查询数（attack 开头重置）
+        self.first_success_query = -1        # 首次出现 RSE>=knee_min_rse 个体时的累计查询数（未达标记 -1）
+        self._clean_pred_cache = None        # 当前样本 clean 预测缓存（attack 开头计算一次；None 时评估内回退现算）
+
+        # ====== 【过程诊断】截断率/预算截断率/空个体率计数（attack 内累计，不影响数值）======
+        self.diag = None
+
     def _get_window_range(self, x_np):
         """计算当前样本每个特征的窗口极差（对齐官方 calculate_test_window_ranges）"""
         if not self.use_window_range:
@@ -959,7 +541,7 @@ class NVITA_NSGA2:
 
     def _random_new_point(self, seq_len, allowed_features, ranges, existing):
         """【变长编码】随机生成一个与 existing 中 (t,f) 不重复的新三元组
-        供「插入变异」与「长度补齐」复用，幅值按该特征的动态预算 epsilon*range[f] 采样
+        供「插入变异」与「长度补齐」复用，幅值按该特征的动态预算 epsilon*range[f] 采样。
         返回: ([t, f, p], (t, f))
         """
         if len(allowed_features) == 0:
@@ -1047,9 +629,18 @@ class NVITA_NSGA2:
                用于违约度计算、knee tie-break 与前沿记录的附带属性。
         """
         x_adv = self._apply_perturbation(x_np, individual)
+        # 【查询计数】每次评估只做 1 次 adv 前向并计入 query_count（clean 已在 attack 开头缓存）
         with torch.no_grad():
             pred_adv = self.model(torch.FloatTensor(x_adv).to(device)).item()
-            pred_clean = self.model(torch.FloatTensor(x_np).to(device)).item()
+        self.query_count += 1
+        # 【clean 缓存】attack 开头对同一 x_np 计算并缓存一次 clean 预测（eval 模式确定性，逐位相同）；
+        #              缓存缺失（如单元测试直接调用本方法）时回退现算并计数，保证数值与原实现等价
+        if self._clean_pred_cache is not None:
+            pred_clean = self._clean_pred_cache
+        else:
+            with torch.no_grad():
+                pred_clean = self.model(torch.FloatTensor(x_np).to(device)).item()
+            self.query_count += 1
 
         # 目标1: 扰动 L₂ 范数（重复位置幅值相加后平方，与扰动施加口径一致）
         seq_len = x_np.shape[1]
@@ -1088,6 +679,25 @@ class NVITA_NSGA2:
         return np.maximum(0.0, n - self.n_max) + np.maximum(0.0, self.n_min - n)
 
     @staticmethod
+    def _constr_dominates(obj_i, cv_i, obj_j, cv_j):
+        """【约束支配判定 / 公共改造】Deb constrained-domination：判定个体 i 是否约束支配个体 j。
+        提取自 _fast_non_dominated_sort 内部闭包，供排序、算子1判父代优劣、算子3/8记功统一复用，
+        禁止各处另写一套。参数：obj_i/obj_j shape=(2,) 二维目标 [L2,-RSE]；cv_i/cv_j 标量违约度。
+        规则：(a) i 可行(cv_i<=0) 而 j 不可行(cv_j>0) → True；
+              (b) 都可行 → 二维标准 Pareto 支配（all(obj_i<=obj_j) 且 any(obj_i<obj_j)）；
+              (c) 都不可行 → cv_i < cv_j；(d) i 不可行而 j 可行 → False。
+        """
+        fi, fj = cv_i <= 0.0, cv_j <= 0.0
+        if fi and not fj:
+            return True                                    # (a) 可行支配不可行
+        if fi and fj:
+            # (b) 都可行：二维目标上的标准 Pareto 支配
+            return bool(np.all(obj_i <= obj_j) and np.any(obj_i < obj_j))
+        if not fi and not fj:
+            return bool(cv_i < cv_j)                        # (c) 都不可行：违约度小者胜
+        return False                                        # (d) i 不可行而 j 可行：必不支配
+
+    @staticmethod
     def _fast_non_dominated_sort(objectives, cv):
         """快速非支配排序（最小化问题，Deb 约束支配版）
         【动机】目标向量由三维 (L2, -RSE, n_actual) 改回二维 (L2, -RSE)：
@@ -1111,26 +721,15 @@ class NVITA_NSGA2:
         domination_count = np.zeros(pop_size, dtype=int)
         dominated_set = [[] for _ in range(pop_size)]
 
-        def _constr_dominates(i, j):
-            """判定个体 i 是否约束支配个体 j（规则 a/b/c）"""
-            fi, fj = cv[i] <= 0.0, cv[j] <= 0.0
-            if fi and not fj:
-                return True                                    # (a) 可行支配不可行
-            if fi and fj:
-                # (b) 都可行：二维目标上的标准 Pareto 支配
-                return bool(np.all(objectives[i] <= objectives[j])
-                            and np.any(objectives[i] < objectives[j]))
-            if not fi and not fj:
-                return cv[i] < cv[j]                             # (c) 都不可行：违约度小者胜
-            return False                                         # i 不可行而 j 可行：必不支配
-
+        # 【公共改造】两两约束支配判定统一复用静态方法 _constr_dominates（规则 a/b/c）
+        dominates = NVITA_NSGA2._constr_dominates
         for i in range(pop_size):
             for j in range(pop_size):
                 if i == j:
                     continue
-                if _constr_dominates(i, j):
+                if dominates(objectives[i], cv[i], objectives[j], cv[j]):
                     dominated_set[i].append(j)
-                elif _constr_dominates(j, i):
+                elif dominates(objectives[j], cv[j], objectives[i], cv[i]):
                     domination_count[i] += 1
 
         fronts = []
@@ -1188,25 +787,95 @@ class NVITA_NSGA2:
         return distance
 
     @staticmethod
+    def _select_knee(front_obj, select_mode='knee', knee_min_rse=2.0,
+                     n_min=1, n_max=10):
+        """【纯重构抽取】从末代第一前沿目标矩阵中选出最终解，返回其在 front_obj 内的行索引。
+
+        与 attack 内联选择完全等价：可行性过滤（cv = max(0,n-n_max)+max(0,n_min-n)）→
+        knee_min_rse 有效性过滤 → 弱前沿回退到攻击最强端点 →
+        二维归一化距理想点 (0,0) 最近 → n_actual / L2 两级 tie-break；
+        max_rse 模式取 -RSE 最小（RSE 最大）端点。
+        front_obj: shape=(k,2) 或 (k,3)；前两列 = [L2, -RSE]；第 3 列（若有）= n_actual 附带属性。
+        n_min / n_max: L0 约束边界，用于计算违约度 cv（与 _constraint_violation 口径一致）。
+        返回：int，选中行在 front_obj 内的索引（0-based）；空前沿返回 0。
+        """
+        front_obj = np.asarray(front_obj, dtype=float)
+        k = front_obj.shape[0]
+        if k == 0:
+            return 0
+        if select_mode != 'knee':
+            return int(np.argmin(front_obj[:, 1]))
+
+        # ---- knee 模式 ----
+        # 违约度计算（与 _constraint_violation 口径一致）
+        if front_obj.shape[1] >= 3:
+            n_vals = front_obj[:, 2]
+            cv = np.maximum(0.0, n_vals - n_max) + np.maximum(0.0, n_min - n_vals)
+        else:
+            cv = np.zeros(k)
+        feasible_mask = cv <= 0.0
+
+        if not np.any(feasible_mask):
+            # 极端回退（正常配置下不触发）：取 -RSE 最小者
+            return 0
+
+        fea_obj = front_obj[feasible_mask]
+        if front_obj.shape[1] >= 3:
+            fea_n = n_vals[feasible_mask]
+        else:
+            fea_n = np.zeros(int(feasible_mask.sum()))
+
+        cand_mask = fea_obj[:, 1] <= -knee_min_rse
+        if np.any(cand_mask):
+            cand_obj = fea_obj[cand_mask]
+            cand_n = fea_n[cand_mask]
+        else:
+            # 弱前沿回退：可行解中攻击最强端点
+            end_pos = int(np.argmin(fea_obj[:, 1]))
+            cand_obj = fea_obj[[end_pos]]
+            cand_n = fea_n[[end_pos]]
+
+        # 二维归一化：按候选集每维最大绝对值缩放到 (0,1]
+        denom = np.max(np.abs(cand_obj), axis=0)
+        denom[denom < 1e-12] = 1.0
+        normed = np.abs(cand_obj) / denom
+        dist = np.sqrt(np.sum(normed ** 2, axis=1))
+        # tie-break（容差 1e-8）：距离相等 → n_actual 更小 → L2 更小
+        ties = np.where(dist <= dist.min() + 1e-8)[0]
+        tie_n = cand_n[ties]
+        min_n_pos = np.where(tie_n <= tie_n.min() + 1e-8)[0]
+        best_in_cand = ties[min_n_pos[int(np.argmin(cand_obj[ties][min_n_pos, 0]))]]
+
+        # 映射回 front_obj 行索引
+        feasible_indices = np.where(feasible_mask)[0]
+        if np.any(cand_mask):
+            cand_indices = feasible_indices[cand_mask]
+        else:
+            cand_indices = feasible_indices[[int(np.argmin(fea_obj[:, 1]))]]
+        return int(cand_indices[best_in_cand])
+
+    @staticmethod
     def _tournament_selection(population, objectives, rank, crowding, pop_size):
         """二元锦标赛选择
         第一优先级：非支配层级 rank（越小越优）
         第二优先级：拥挤距离（越大越优，维持种群多样性）
         【变长编码适配】仅把种群容器从 ndarray 换成 list（个体长度不一，无法堆成矩形矩阵），
         选择判据只依赖 rank/crowding，与编码长度和目标维度均无关，逻辑完全不变
+        返回：selected（list，选中个体副本）
         """
         n = len(population)
         selected = []
         while len(selected) < pop_size:
             i, j = np.random.choice(n, 2, replace=False)
             if rank[i] < rank[j]:
-                selected.append(population[i].copy())
+                chosen = i
             elif rank[j] < rank[i]:
-                selected.append(population[j].copy())
+                chosen = j
             elif crowding[i] > crowding[j]:
-                selected.append(population[i].copy())
+                chosen = i
             else:
-                selected.append(population[j].copy())
+                chosen = j
+            selected.append(population[chosen].copy())
         return selected
 
     def _clip_tf_budget(self, c, seq_len, num_features, ranges):
@@ -1246,28 +915,23 @@ class NVITA_NSGA2:
         return np.array(out, dtype=float)
 
     def _enforce_length_bounds(self, c, seq_len, num_features, ranges, allowed_features):
-        """【变长编码】长度合法性修复：把扰动点数 n 拉回 [n_min, n_max]
-        1) 长度截断：若 n > n_max，随机删除扰动点直到 n == n_max
-        2) 长度补齐：若 n < n_min，随机新增不重复扰动点直到 n == n_min
-        （去重合并、交叉尾部交换都可能让 n 越界，故交叉/变异末尾统一调用）
+        """【变长编码 / 方案A】长度合法性修复：仅截断超长到 n_max，不再补齐到 n_min
+        1) 长度截断（硬保护）：若 n > n_max，随机删除扰动点直到 n == n_max，个体长度永不超过 n_max
+        2)【方案A 移除长度补齐】不再把 n < n_min 的个体补回 n_min：允许 n < n_min 的不可行个体
+           （含 n=0 的空个体 shape=(0,)）进入种群，由 Deb 约束支配（可行优先）惩罚，
+           使 L0 约束真正在进化中起筛选作用（此前 cv 恒为 0、约束非绑定）。
+        返回值可能是空数组 shape=(0,)；截断中 kept 为空时返回空数组而非报错。
+        seq_len / num_features / ranges / allowed_features 形参保留以兼容原调用签名（截断不再使用它们）。
         """
         c = np.asarray(c, dtype=float)
         n_points = self._num_points(c)
 
-        # ---- 1) 长度截断 ----
+        # ---- 长度截断（硬保护：n 不得超过 n_max）----
         while n_points > self.n_max:
             drop = int(np.random.randint(0, n_points))
             kept = [c[3*k:3*k+3] for k in range(n_points) if k != drop]
-            c = np.concatenate(kept).astype(float)
+            c = np.concatenate(kept).astype(float) if kept else np.array([], dtype=float)
             n_points -= 1
-
-        # ---- 2) 长度补齐 ----
-        while n_points < self.n_min:
-            existing = {(int(round(c[3*k])), int(round(c[3*k+1]))) for k in range(n_points)}
-            new_point = np.array(self._random_new_point(seq_len, allowed_features, ranges, existing)[0],
-                                 dtype=float)
-            c = np.concatenate([c, new_point]) if n_points > 0 else new_point
-            n_points += 1
 
         return c
 
@@ -1276,13 +940,19 @@ class NVITA_NSGA2:
         1) 两个父代长度可不同（3n1 / 3n2），分别在各自的三元组边界上随机选一个交叉点，
            交换尾部片段生成两个子代（子代长度因此天然可变）
         2) 位置去重：_repair_unique 合并重复 (t,f) 位置的幅值（n 可能减小）
-        3) 长度截断/补齐：_enforce_length_bounds 把 n 拉回 [n_min, n_max]
+        3) 长度截断（方案A：仅截断超长到 n_max，不补齐到 n_min）：_enforce_length_bounds
         4) 预算截断：_clip_tf_budget 按最终 f 的动态预算截断幅值
            （先去重再截断：修复过程可能改变 f，须按新 f 的预算重截 p）
         """
+        # 【交叉概率门控】随机数 > crossover_prob 则不交叉，直接返回父代副本
         if np.random.random() > self.crossover_prob:
             return parent1.copy(), parent2.copy()
+        return self._crossover_single(parent1, parent2, seq_len, num_features, ranges, allowed_features)
 
+    def _crossover_single(self, parent1, parent2, seq_len, num_features, ranges, allowed_features):
+        """【变长单点交叉】两个父代在各自三元组边界随机选交叉点、交换尾部片段生成两个变长子代，
+        随后统一执行位置去重 + 长度截断 + 预算截断。
+        """
         parent1 = np.asarray(parent1, dtype=float)
         parent2 = np.asarray(parent2, dtype=float)
         n1 = self._num_points(parent1)
@@ -1300,7 +970,7 @@ class NVITA_NSGA2:
         repaired = []
         for c in (c1, c2):
             c = self._repair_unique(c, seq_len, allowed_features)                                   # 位置去重
-            c = self._enforce_length_bounds(c, seq_len, num_features, ranges, allowed_features)     # 长度截断/补齐
+            c = self._enforce_length_bounds(c, seq_len, num_features, ranges, allowed_features)     # 长度截断（方案A：仅截断，不补齐）
             c = self._clip_tf_budget(c, seq_len, num_features, ranges)                              # 预算截断
             repaired.append(c)
         return repaired[0], repaired[1]
@@ -1312,8 +982,8 @@ class NVITA_NSGA2:
            或 p（归一化到 [0,1] 做标准多项式变异 PM，再线性映回 [-budget, budget]）
         2) 插入变异（概率 self.insert_prob，默认 0.1）：随机新增一个不重复的 (t,f,p) 三元组，
            n+1，且插入后不超过 n_max
-        3) 删除变异（概率 self.delete_prob，默认 0.1）：随机删除一个三元组，
-           n-1，且删除后不低于 n_min
+        3) 删除变异（概率 self.delete_prob，默认 0.2）：随机删除一个三元组，n-1；
+           【方案A】不再限制 n_min 下限，允许删到 0（产生不可行个体，交由 Deb 约束支配惩罚）
         变异后统一执行 _repair_unique + _enforce_length_bounds + _clip_tf_budget 合法性修复
         """
         mutant = np.asarray(individual, dtype=float).copy()
@@ -1351,16 +1021,18 @@ class NVITA_NSGA2:
                                  dtype=float)
             mutant = np.concatenate([mutant, new_point])
             n_points += 1
-        # ---------- 3) 删除变异：n-1（不低于 n_min）----------
-        elif np.random.random() < self.delete_prob and n_points > self.n_min:
+        # ---------- 3) 删除变异：n-1（【方案A】不再限制 n_min 下限，允许删到 0）----------
+        elif np.random.random() < self.delete_prob and n_points > 0:
             drop = int(np.random.randint(0, n_points))
             kept = [mutant[3*k:3*k+3] for k in range(n_points) if k != drop]
-            mutant = np.concatenate(kept).astype(float)
+            # 【方案A】kept 可能为空（n_points==1 删到 0），返回空数组而非 np.concatenate([]) 报错
+            mutant = np.concatenate(kept).astype(float) if kept else np.array([], dtype=float)
             n_points -= 1
 
         # ---------- 统一合法性修复 ----------
         mutant = self._repair_unique(mutant, seq_len, allowed_features)
-        # 变长编码额外保障：点级变异挪动 t/f 后可能触发去重合并，使 n 跌破 n_min，此处统一拉回区间
+        # 【方案A】_enforce_length_bounds 现仅截断超长到 n_max，不再补齐到 n_min；
+        #          点级变异/去重合并可能使 n 跌破 n_min，此类不可行个体被保留，交由 Deb 约束支配惩罚
         mutant = self._enforce_length_bounds(mutant, seq_len, num_features, ranges, allowed_features)
         mutant = self._clip_tf_budget(mutant, seq_len, num_features, ranges)
         return mutant
@@ -1385,13 +1057,35 @@ class NVITA_NSGA2:
         y_val = y.detach().cpu().item()
         seq_len = x_np.shape[1]
         num_features = x_np.shape[2]
+
+        # 【查询计数 / 过程诊断】每样本开头重置累计查询数、首次成功查询数与诊断计数器
+        self.query_count = 0
+        self.first_success_query = -1
+        self.diag = {'trunc_len_cnt': 0, 'trunc_len_tot': 0,      # 长度截断（n>n_max）触发次数 / 总修复个体数
+                     'budget_clip_cnt': 0, 'budget_clip_tot': 0,  # 预算截断改变 p 的点数 / 总点数
+                     'empty_after_cross': 0, 'empty_after_mut': 0, 'cross_mut_tot': 0}  # 空个体率
+
         allowed_features = self._sample_features(num_features)
         ranges = self._get_window_range(x_np)
 
         # 没有允许扰动的特征，直接返回原始输入
         if len(allowed_features) == 0:
             empty_pareto = np.array([]).reshape(0, 2)   # 双目标：空前沿列数为 2
-            return X, 0.0, [], empty_pareto, []
+            self._clean_pred_cache = None
+            return X, 0.0, [], empty_pareto, [], {'query_count': 0, 'first_success_query': -1}
+
+        # 【clean 缓存】对当前样本 x_np 只查一次 clean 预测并缓存（eval 确定性，_evaluate_objectives 复用；
+        #               model 前向不消耗 np.random 流，种群初始化随机流与原实现逐位一致）
+        with torch.no_grad():
+            self._clean_pred_cache = self.model(torch.FloatTensor(x_np).to(device)).item()
+        self.query_count += 1
+
+        # 【first_success_query 跟踪】封装评估：调用 _evaluate_objectives 后检查是否首次达到 RSE>=knee_min_rse
+        def _eval_and_track(ind):
+            obj, n_act = self._evaluate_objectives(x_np, y_val, ind, device)
+            if self.first_success_query < 0 and (-obj[1]) >= self.knee_min_rse:
+                self.first_success_query = self.query_count
+            return obj, n_act
 
         # ========== 1. 种群初始化（【变长编码】每个个体的 n 独立随机采样，种群用 list 承载）==========
         population = [
@@ -1403,7 +1097,7 @@ class NVITA_NSGA2:
         objectives = np.zeros((self.pop_size, 2))          # 双目标 [L2, -RSE]，形状恒为 (N, 2)
         n_actual_pop = np.zeros(self.pop_size)             # 约束变量 n_actual（不进入 objectives）
         for i in range(self.pop_size):
-            objectives[i], n_actual_pop[i] = self._evaluate_objectives(x_np, y_val, population[i], device)
+            objectives[i], n_actual_pop[i] = _eval_and_track(population[i])
 
         # ========== 3. 每代 Pareto 前沿记录 ==========
         generation_pareto = []
@@ -1427,11 +1121,12 @@ class NVITA_NSGA2:
                 population, objectives, rank, crowding, self.pop_size
             )
 
-            # 生成子代：变长单点交叉 + 三类变异（末尾均含合法性修正、位置去重与长度修复）
+            # 生成子代：变长单点交叉 + 点级变异（末尾均含合法性修正、位置去重与长度修复）
             offspring = []
             for i in range(0, self.pop_size, 2):
+                j = min(i + 1, self.pop_size - 1)
                 p1 = mating_pool[i]
-                p2 = mating_pool[min(i + 1, self.pop_size - 1)]
+                p2 = mating_pool[j]
                 c1, c2 = self._crossover(p1, p2, seq_len, num_features, ranges, allowed_features)
                 c1 = self._mutation(c1, seq_len, num_features, ranges, allowed_features)
                 c2 = self._mutation(c2, seq_len, num_features, ranges, allowed_features)
@@ -1443,9 +1138,7 @@ class NVITA_NSGA2:
             offspring_obj = np.zeros((len(offspring), 2))
             n_actual_off = np.zeros(len(offspring))
             for i in range(len(offspring)):
-                offspring_obj[i], n_actual_off[i] = self._evaluate_objectives(
-                    x_np, y_val, offspring[i], device
-                )
+                offspring_obj[i], n_actual_off[i] = _eval_and_track(offspring[i])
 
             # μ+λ 环境选择：合并父代和子代（变长个体无法 vstack，改用 list 拼接）
             combined_pop = population + offspring
@@ -1457,16 +1150,16 @@ class NVITA_NSGA2:
             fronts_combined, rank_combined = self._fast_non_dominated_sort(combined_obj, cv_combined)
             crowding_combined = self._crowding_distance(combined_obj, fronts_combined)
 
-            # 按「约束可行（已由约束支配编码进 rank）→ 非支配层级升序 → 同层拥挤距离降序」选择前 pop_size 个
+            # 按「约束可行（已由约束支配编码进 rank）→ 非支配层级升序 → 同层多样性降序」选择前 pop_size 个
             selected_indices = []
             for front in fronts_combined:
                 if len(selected_indices) + len(front) <= self.pop_size:
                     selected_indices.extend(front)
                 else:
+                    remaining = self.pop_size - len(selected_indices)
                     front_crowding = crowding_combined[front]
                     front_arr = np.array(front)
                     sorted_front = front_arr[np.argsort(-front_crowding)]
-                    remaining = self.pop_size - len(selected_indices)
                     selected_indices.extend(sorted_front[:remaining].tolist())
                     break
 
@@ -1474,12 +1167,11 @@ class NVITA_NSGA2:
             objectives = combined_obj[selected_indices]
             n_actual_pop = combined_n_actual[selected_indices]
 
-        # 记录最后一代的第一 Pareto 前沿（同样携带 n_actual 附带属性）
+        # 【修复】不再重复追加 generation_pareto：for gen in range(maxiter) 的最后一次迭代
+        # 开头已记录了该代前沿，再追加会导致多 1 条（绘图出现超出 maxiter 的代数）。
+        # final_fronts 仍需计算，供后续膝点选择与最终前沿输出使用。
         cv_pop = self._constraint_violation(n_actual_pop)
         final_fronts, _ = self._fast_non_dominated_sort(objectives, cv_pop)
-        if len(final_fronts) > 0:
-            generation_pareto.append(
-                np.column_stack([objectives[final_fronts[0]], n_actual_pop[final_fronts[0]]]).copy())
 
         # ========== 5. 选择最终解（按 select_mode 决定折中膝点或攻击上界端点）==========
         # 'knee'（默认）：从最终第一前沿的可行解（cv=0）中选择二维归一化后距理想点最近的折中解，
@@ -1489,48 +1181,24 @@ class NVITA_NSGA2:
         #   有效性下界 knee_min_rse：仅 RSE>=knee_min_rse（即 -RSE<=-knee_min_rse）的前沿点参与膝点评选；
         #   弱前沿上若无有效点，回退到可行且攻击最强端点，保证结果不是近零扰动
         # 'max_rse'：取 RSE 最大端点（攻击强度上界，完全忽略 L2 隐蔽性与稀疏性），保留用于消融对比
-        if self.select_mode == 'knee' and len(final_fronts) > 0:
+        if len(final_fronts) > 0:
             front_idx = np.array(final_fronts[0])
             front_obj = objectives[front_idx]
             front_n = n_actual_pop[front_idx]
-            front_cv = self._constraint_violation(front_n)
-            feasible_mask = front_cv <= 0.0            # 膝点只在可行解（n_actual ∈ [n_min, n_max]）中评选
-            if feasible_mask.any():
-                fea_idx = front_idx[feasible_mask]
-                fea_obj = front_obj[feasible_mask]
-                cand_mask = fea_obj[:, 1] <= -self.knee_min_rse   # -RSE <= -knee_min_rse 即 RSE >= knee_min_rse
-                if cand_mask.any():
-                    cand_idx = fea_idx[cand_mask]
-                    cand_obj = fea_obj[cand_mask]
-                    cand_n = front_n[feasible_mask][cand_mask]
-                else:
-                    end_pos = int(np.argmin(fea_obj[:, 1]))       # 弱前沿回退：可行解中攻击最强端点
-                    cand_idx = fea_idx[[end_pos]]
-                    cand_obj = fea_obj[[end_pos]]
-                    cand_n = front_n[feasible_mask][[end_pos]]
-            else:
-                # 极端回退：前沿内无可行解时取违约度最小且攻击最强者（正常配置下不会触发）
-                order = np.lexsort((front_obj[:, 1], front_cv))
-                cand_idx = front_idx[order[:1]]
-                cand_obj = front_obj[order[:1]]
-                cand_n = front_n[order[:1]]
-            # 【二维归一化】按候选集每维最大绝对值缩放到 (0,1]（-RSE 恒为负，|−RSE|/max|−RSE| ∈ (0,1]）
-            denom = np.max(np.abs(cand_obj), axis=0)
-            denom[denom < 1e-12] = 1.0                 # 防除零（候选集在该维全为 0 时）
-            normed = np.abs(cand_obj) / denom
-            dist = np.sqrt(np.sum(normed ** 2, axis=1))   # 距理想点 (0,0) 欧氏距离
-            # tie-break（容差 1e-8）：距离相等时取 n_actual 更小者（等优更稀疏），仍相等取 L2 更小者
-            ties = np.where(dist <= dist.min() + 1e-8)[0]
-            tie_n = cand_n[ties]
-            min_n_pos = np.where(tie_n <= tie_n.min() + 1e-8)[0]
-            best_pos = ties[min_n_pos[int(np.argmin(cand_obj[ties][min_n_pos, 0]))]]
-            best_idx = cand_idx[best_pos]
+            # 构造含 n_actual 附带属性的前沿矩阵，供 _select_knee 内部计算违约度与 tie-break
+            front_obj_with_n = np.column_stack([front_obj, front_n])
+
+            # 膝点 / max_rse 选择：统一委托给 _select_knee 静态方法
+            knee_pos = self._select_knee(front_obj_with_n, self.select_mode,
+                                         self.knee_min_rse, self.n_min, self.n_max)
+            best_idx = front_idx[knee_pos]
         else:
             best_idx = np.argmin(objectives[:, 1])  # 上界模式/回退：-RSE 最小即 RSE 最大
         best_ind = population[int(best_idx)].copy()
         x_adv_final = self._apply_perturbation(x_np, best_ind)
         with torch.no_grad():
             pred_best = self.model(torch.FloatTensor(x_adv_final).to(device)).item()
+        self.query_count += 1   # 【查询计数】最终选中解复算 best_mse 的一次前向如实计入
         best_mse = (pred_best - y_val) ** 2
 
         # 最终第一 Pareto 前沿（【变长编码】解集用 list 承载；目标值矩阵恒为 (k, 2)）
@@ -1541,18 +1209,21 @@ class NVITA_NSGA2:
             pareto_solutions = []
             pareto_objectives = np.array([]).reshape(0, 2)
 
+        # 【查询计数】返回本样本查询统计：总查询数 + 首次达标(RSE>=knee_min_rse)累计查询数（未达标 -1）
+        query_info = {'query_count': int(self.query_count),
+                      'first_success_query': int(self.first_success_query)}
         return (
             torch.FloatTensor(x_adv_final).to(device),
             float(best_mse),
             pareto_solutions,
             pareto_objectives,
             generation_pareto,
+            query_info,
         )
 
 
-
 # =============================================================================
-# SECTION 7: NSGA-II 批量攻击与 Pareto 进化可视化
+# SECTION 5: NSGA-II 批量攻击与 Pareto 进化可视化
 # =============================================================================
 
 
@@ -1608,6 +1279,10 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
     all_sel_rse = []       # 选中解的目标2还原量：RSE = -obj[1]
     all_sel_n_actual = []  # 选中解的约束变量：实际扰动点数（L0，要求 ∈ [n_min, n_max]）
     all_generation_pareto = []
+    # ====== 【查询效率 / 开销】（第8点）逐样本收集总查询数、首次达标查询数、墙钟耗时 ======
+    all_query_count = []
+    all_first_success_query = []
+    all_wall_time = []
 
     attacker = NVITA_NSGA2(
         n_min=n_min, n_max=n_max, epsilon=beta, model=model,   # 变长编码：n_min / n_max
@@ -1618,7 +1293,7 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
         select_mode=select_mode,
         knee_min_rse=knee_min_rse,
         insert_prob=insert_prob,
-        delete_prob=delete_prob
+        delete_prob=delete_prob,
     )
 
     total = X_test.shape[0]
@@ -1626,8 +1301,12 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
         X_current = X_test[test_ind].unsqueeze(0).to(device)
         y_current = Y_test[test_ind].unsqueeze(0).to(device)
 
-        X_adv, best_mse, pareto_solutions, pareto_objectives, generation_pareto = \
+        _t0 = time.perf_counter()   # 【开销】单样本墙钟计时
+        X_adv, best_mse, pareto_solutions, pareto_objectives, generation_pareto, query_info = \
             attacker.attack(X_current, y_current, seed=test_ind)
+        all_wall_time.append(time.perf_counter() - _t0)
+        all_query_count.append(int(query_info.get('query_count', 0)))
+        all_first_success_query.append(int(query_info.get('first_success_query', -1)))
 
         X_adv_total = torch.cat((X_adv_total, X_adv), dim=0)
 
@@ -1686,6 +1365,18 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
         'sel_rses': all_sel_rse,
         'sel_n_actuals': all_sel_n_actual,
         'total_samples': total,
+        # ====== 【查询效率 / 开销】（第8点）first_success_query 均值/中位数、未达标占比、平均总查询数、墙钟 ======
+        'query_counts': all_query_count,
+        'first_success_queries': all_first_success_query,
+        'wall_times': all_wall_time,
+        'mean_query_count': float(np.mean(all_query_count)) if all_query_count else 0.0,
+        'mean_first_success_query': float(np.mean([q for q in all_first_success_query if q >= 0]))
+                                    if any(q >= 0 for q in all_first_success_query) else -1.0,
+        'median_first_success_query': float(np.median([q for q in all_first_success_query if q >= 0]))
+                                      if any(q >= 0 for q in all_first_success_query) else -1.0,
+        'first_success_miss_rate': float(np.mean([q < 0 for q in all_first_success_query]))
+                                   if all_first_success_query else 0.0,
+        'mean_wall_time': float(np.mean(all_wall_time)) if all_wall_time else 0.0,
     }
 
     # 汇总所有样本的最终前沿，计算全局最终 Pareto 前沿（跨样本二维非支配筛选，O(N log N)）
@@ -1714,14 +1405,18 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
     return X_adv_total, metrics, all_generation_pareto
 
 
-def plot_pareto_evolution(generation_pareto, n_min, n_max, pop_size, save_path=None):
+def plot_pareto_evolution(generation_pareto, n_min, n_max, pop_size, save_path=None,
+                          selected_obj=None):
     """
     绘制双目标 Pareto 前沿进化二维散点图（L0 作为约束，n in [n_min, n_max]）
     横轴：扰动 L2 范数（目标1，越小越隐蔽）
     纵轴：-RSE（目标2，越小代表攻击效果越强）
-    点颜色：实际扰动点数 n_actual（约束变量，颜色条标注，体现稀疏度从前沿涌现）
-    代数：透明度随代数递增区分（越晚越实），最后一代加黑色描边突出
+    代数：点颜色与透明度均随代数递增（越晚越亮越实），最后一代加黑色描边突出
     记录格式：generation_pareto 每条 shape=(m,3) = [L2, -RSE, n_actual(附带属性)]
+    【双目标改造】删除以 n_actual 着色的颜色条：n_actual 是约束变量而非目标维，第三维从
+    「坐标轴（三目标版）→ 颜色条（双目标初版）」的遗留编码已彻底移出图形通道，
+    其统计量仍由 metrics / analysis_data.pkl 持久化
+    selected_obj: 可选，(L2, -RSE) 元组或 shape=(2,) 数组，非空时在末代前沿上叠加星形标记
     """
     n_generations = len(generation_pareto)
     if n_generations == 0:
@@ -1730,23 +1425,16 @@ def plot_pareto_evolution(generation_pareto, n_min, n_max, pop_size, save_path=N
 
     fig, ax = plt.subplots(figsize=(11, 8))
 
-    # 收集所有代的点（颜色统一映射 n_actual，透明度编码代数）
-    all_l2, all_nrse, all_n, all_alpha, last_gen_mask = [], [], [], [], []
+    # 收集所有代的点（颜色与透明度均映射代数）
+    all_l2, all_nrse, all_gen, all_alpha, last_gen_mask = [], [], [], [], []
     for gen_idx, front_data in enumerate(generation_pareto):
         if front_data.shape[0] == 0:
             continue
-        l2_vals = front_data[:, 0]       # 目标1: L2 范数
-        neg_rse_vals = front_data[:, 1]  # 目标2: -RSE（已是取负号后的最小化形式）
-        # n_actual: 约束变量（记录第 3 列附带属性，不参与支配）
-        if front_data.shape[1] >= 3:
-            n_actual_vals = front_data[:, 2]
-        else:
-            n_actual_vals = np.full(front_data.shape[0], np.nan)
         is_last = (gen_idx == n_generations - 1)
         alpha = 0.35 + 0.65 * (gen_idx / max(n_generations - 1, 1))   # 代数越晚越实
-        all_l2.append(l2_vals)
-        all_nrse.append(neg_rse_vals)
-        all_n.append(n_actual_vals)
+        all_l2.append(front_data[:, 0])       # 目标1: L2 范数
+        all_nrse.append(front_data[:, 1])     # 目标2: -RSE（已是取负号后的最小化形式）
+        all_gen.append(np.full(front_data.shape[0], gen_idx))
         all_alpha.append(np.full(front_data.shape[0], alpha))
         last_gen_mask.append(np.full(front_data.shape[0], is_last))
     if not all_l2:
@@ -1755,29 +1443,36 @@ def plot_pareto_evolution(generation_pareto, n_min, n_max, pop_size, save_path=N
         return
     xs = np.concatenate(all_l2)
     ys = np.concatenate(all_nrse)
-    cs = np.concatenate(all_n)
+    gen_ids = np.concatenate(all_gen)
     alphas = np.concatenate(all_alpha)
     lasts = np.concatenate(last_gen_mask)
 
-    # 颜色统一映射 n_actual（viridis），逐点 alpha 写入 RGBA 第 4 通道（matplotlib 的
+    # 颜色统一映射代数（viridis），逐点 alpha 写入 RGBA 第 4 通道（matplotlib 的
     # scatter alpha 参数只接受标量，透明度随代数递增须通过 RGBA 实现）
-    c_arr = np.asarray(cs, dtype=float)
-    c_valid = c_arr[np.isfinite(c_arr)]
-    vmin = c_valid.min() if c_valid.size else 0.0
-    vmax = c_valid.max() if c_valid.size else 1.0
-    norm = plt.Normalize(vmin=vmin, vmax=max(vmax, vmin + 1e-9))
-    rgba = plt.cm.viridis(norm(np.nan_to_num(c_arr, nan=vmin)))
+    norm = plt.Normalize(vmin=0, vmax=max(n_generations - 1, 1))
+    rgba = plt.cm.viridis(norm(gen_ids))
     rgba[:, 3] = alphas
 
-    sc = ax.scatter(xs[~lasts], ys[~lasts], c=rgba[~lasts], s=45, edgecolors='none')
+    ax.scatter(xs[~lasts], ys[~lasts], c=rgba[~lasts], s=45, edgecolors='none')
     ax.scatter(xs[lasts], ys[lasts], c=rgba[lasts], s=60,
                edgecolors='k', linewidths=0.6,
                label=f'Final gen ({n_generations - 1})')
 
+    # 可选：叠加 knee / max_rse 选中解的星形标记
+    if selected_obj is not None:
+        sel = np.asarray(selected_obj, dtype=float).ravel()
+        if sel.shape[0] >= 2:
+            ax.scatter(sel[0], sel[1], marker='*', s=220, c='gold',
+                       edgecolors='k', linewidths=0.8, zorder=5,
+                       label=f'Selected ({sel[0]:.4f}, {sel[1]:.4f})')
+
     sm = plt.cm.ScalarMappable(cmap='viridis', norm=norm)
     sm.set_array([])
     cb = fig.colorbar(sm, ax=ax)
-    cb.set_label('n_actual (constraint variable, sparsity)', fontsize=12)
+    cb.set_label('Generation index', fontsize=12)
+    # 代数索引为整数，避免颜色条刻度显示成 2.0 / 4.0 之类的小数
+    cb.set_ticks(np.unique(np.linspace(0, n_generations - 1, min(n_generations, 6)).round()))
+    cb.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{int(round(v))}'))
 
     ax.set_xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
     ax.set_ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
@@ -1785,8 +1480,8 @@ def plot_pareto_evolution(generation_pareto, n_min, n_max, pop_size, save_path=N
                  f'pop_size={pop_size})', fontsize=13, fontweight='bold')
     ax.grid(True, alpha=0.3)
     ax.legend(title='Generation', loc='upper right', fontsize=9)
-    ax.text(0.02, -0.13, '点颜色 = n_actual（约束变量，稀疏度从前沿涌现）；透明度随代数递增（越晚越实），'
-            '最后一代加黑色描边',
+    ax.text(0.02, -0.13, '颜色与透明度均随代数递增（越晚越亮越实），最后一代加黑色描边；'
+            'n_actual 为约束变量，统计量见控制台输出与 analysis_data.pkl',
             transform=ax.transAxes, fontsize=9, color='dimgray')
 
     if save_path:
@@ -1796,11 +1491,352 @@ def plot_pareto_evolution(generation_pareto, n_min, n_max, pop_size, save_path=N
     plt.show()
 
 
+def plot_pareto_evolution_key_generations(all_generation_pareto, save_path=None, n_key_gens=5):
+    """【双目标】绘制关键代数 Pareto 前沿对比图（跨样本聚合 + 逐代二维非支配筛选 + 连接线）
+
+    双目标 (L2, -RSE) 下前沿本身就是平面曲线，因此把每一代前沿画成一条带连接线的曲线，
+    取首代 / 中间若干代 / 末代共 n_key_gens 条曲线叠在同一张图上，展示前沿随代数向左下
+    （L2 更小且 -RSE 更小 = 更隐蔽且更强攻击）收敛的过程。
+
+    统计口径与全局最终前沿一致：同一代先把所有样本的前沿点合并（vstack），再做一次
+    二维非支配筛选（extract_first_front，n_actual 为附带属性不参与支配），
+    避免逐样本各画一条曲线导致图形爆炸。
+    all_generation_pareto: run_nsga2_standalone_attack 返回的记录列表，每条含
+                           'generation_pareto'（每代 shape=(m,3) = [L2, -RSE, n_actual]）
+    返回实际保存的图片路径列表。
+    """
+    valid_recs = [rec for rec in all_generation_pareto
+                  if len(rec.get('generation_pareto', [])) > 0]
+    if not valid_recs:
+        print("警告: 无 Pareto 进化数据可绘制关键代数对比图")
+        return []
+    n_gen = max(len(rec['generation_pareto']) for rec in valid_recs)
+    if n_gen < 2:
+        print(f"警告: 进化代数仅为 {n_gen}，关键代数对比图无意义，跳过绘制")
+        return []
+
+    # 关键代数索引（0-based）：首代 + 末代 + 中间等距采样，去重后按代数升序
+    n_key = int(min(max(n_key_gens, 2), n_gen))
+    key_gens = sorted(set(np.linspace(0, n_gen - 1, n_key).round().astype(int).tolist()))
+
+    cmap = plt.get_cmap('viridis')
+    markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'X']
+    plt.figure(figsize=(11, 8))
+    plotted_gens = []
+    for k, g in enumerate(key_gens):
+        gen_pts = [rec['generation_pareto'][g] for rec in valid_recs
+                   if g < len(rec['generation_pareto'])
+                   and rec['generation_pareto'][g].shape[0] > 0]
+        if not gen_pts:
+            continue
+        front = extract_first_front(np.vstack(gen_pts))[:, :2]   # 只取双目标列作图
+        if front.shape[0] == 0:
+            continue
+        front = front[np.argsort(front[:, 0], kind='stable')]    # 按 L2 升序连线
+        color = cmap(k / max(len(key_gens) - 1, 1))
+        plt.plot(front[:, 0], front[:, 1], '-', color=color, linewidth=2.0, alpha=0.85,
+                 label=f'Gen {g + 1}/{n_gen} (front size={front.shape[0]})')
+        plt.scatter(front[:, 0], front[:, 1], c=[color], marker=markers[k % len(markers)],
+                    s=70, edgecolors='k', linewidths=0.5, zorder=3)
+        plotted_gens.append(int(g))
+
+    if not plotted_gens:
+        print("警告: 关键代数前沿数据全部为空，跳过绘制")
+        plt.close()
+        return []
+
+    plt.xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
+    plt.ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
+    plt.title('Pareto Front Evolution at Key Generations\n'
+              '(cross-sample aggregated fronts, bi-objective with L0 as constraint)',
+              fontsize=13, fontweight='bold')
+    plt.legend(fontsize=10, loc='upper right', title='Generation')
+    plt.grid(True, alpha=0.3)
+    plt.text(0.02, -0.13, '注：每代先将各样本前沿点合并再做二维非支配筛选；曲线越靠左下方越优；'
+             f'实际绘制代数（1-based）= {[g + 1 for g in plotted_gens]}',
+             transform=plt.gca().transAxes, fontsize=9, color='dimgray')
+    plt.tight_layout()
+
+    saved = []
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"  关键代数 Pareto 前沿对比图已保存至: {save_path}")
+        saved.append(save_path)
+    plt.show()
+    return saved
+
+
+def plot_multi_sample_pf_evolution(all_records, n_label, pop_size, maxiter, out_dir,
+                                   select_mode='knee', knee_min_rse=2.0,
+                                   n_min=1, n_max=10,
+                                   num_samples=10, seed=42):
+    """随机抽取 num_samples 个评估时间窗口，绘制各自 Pareto 前沿进化图（2×5 总览 + 单样本高清）
+
+    不重跑攻击，直接使用缓存的 all_records（run_nsga2_standalone_attack 返回的 all_generation_pareto）。
+    all_records: list[dict]，每条含 'sample_idx' / 'generation_pareto' / 'final_pareto_obj'。
+    返回：(overview_path, sample_paths, sampled_indices)
+        overview_path:  2×5 总览图路径（str 或 None）
+        sample_paths:   单样本图路径列表 list[str]
+        sampled_indices: 抽中的 sample_idx 列表
+    """
+    # ---- 1. 可复现随机抽样 ----
+    rng = np.random.default_rng(seed)
+    n_total = len(all_records)
+    if n_total == 0:
+        print("警告: all_records 为空，跳过多样本 Pareto 进化绘图")
+        return None, [], []
+    n_pick = min(num_samples, n_total)
+    picked = rng.choice(n_total, size=n_pick, replace=False)
+    sampled_indices = [int(all_records[i]['sample_idx']) for i in picked]
+    print(f"[plot_multi_sample_pf] 抽中 {n_pick} 个样本 (seed={seed}): {sampled_indices}")
+
+    # ---- 2. 统一代数→颜色映射（取所有抽中样本的最大代数）----
+    max_gen = 0
+    for idx in picked:
+        rec = all_records[idx]
+        ng = len(rec.get('generation_pareto', []))
+        if ng > max_gen:
+            max_gen = ng
+    max_gen = max(max_gen, 1)
+    norm_global = plt.Normalize(vmin=0, vmax=max_gen - 1)
+
+    os.makedirs(out_dir, exist_ok=True)
+    samples_dir = os.path.join(out_dir, 'pf_evolution_samples')
+    os.makedirs(samples_dir, exist_ok=True)
+
+    # ---- 3. 2×5 总览图 ----
+    n_rows, n_cols = 2, 5
+    n_slots = n_rows * n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 10))
+    axes_flat = axes.flatten()
+
+    for slot in range(n_slots):
+        ax = axes_flat[slot]
+        if slot >= n_pick:
+            ax.set_visible(False)
+            continue
+        rec = all_records[picked[slot]]
+        gen_pareto = rec.get('generation_pareto', [])
+        n_gens = len(gen_pareto)
+        sidx = rec.get('sample_idx', picked[slot])
+
+        # 收集所有代的点
+        all_l2, all_nrse, all_gen_id = [], [], []
+        for gi, fd in enumerate(gen_pareto):
+            if fd.shape[0] == 0:
+                continue
+            all_l2.append(fd[:, 0])
+            all_nrse.append(fd[:, 1])
+            all_gen_id.append(np.full(fd.shape[0], gi))
+
+        if not all_l2:
+            ax.text(0.5, 0.5, f'Sample #{sidx}\n(no data)', ha='center', va='center',
+                    transform=ax.transAxes, fontsize=9)
+            continue
+
+        xs = np.concatenate(all_l2)
+        ys = np.concatenate(all_nrse)
+        gids = np.concatenate(all_gen_id)
+        rgba = plt.cm.viridis(norm_global(gids))
+        # 透明度随代数递增
+        for gi_idx in range(len(gids)):
+            rgba[gi_idx, 3] = 0.35 + 0.65 * (gids[gi_idx] / max(max_gen - 1, 1))
+
+        ax.scatter(xs, ys, c=rgba, s=18, edgecolors='none')
+        ax.set_title(f'Sample #{sidx}', fontsize=10, fontweight='bold')
+        ax.set_xlabel('L2 Norm', fontsize=8)
+        ax.set_ylabel('-RSE', fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.2)
+
+        # knee 选中解标记
+        final_obj = rec.get('final_pareto_obj')
+        if isinstance(final_obj, np.ndarray) and final_obj.shape[0] > 0:
+            knee_pos = NVITA_NSGA2._select_knee(final_obj, select_mode, knee_min_rse, n_min, n_max)
+            sel_pt = final_obj[knee_pos, :2]
+            ax.scatter(sel_pt[0], sel_pt[1], marker='*', s=120, c='gold',
+                       edgecolors='k', linewidths=0.5, zorder=5)
+            ax.annotate(f'({sel_pt[0]:.3f},{sel_pt[1]:.3f})',
+                        xy=(sel_pt[0], sel_pt[1]), fontsize=6,
+                        xytext=(4, 4), textcoords='offset points', color='darkred')
+
+    # 共享 colorbar
+    sm = plt.cm.ScalarMappable(cmap='viridis', norm=norm_global)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes_flat[:n_pick].tolist(), location='right',
+                        shrink=0.8, pad=0.02)
+    cbar.set_label('Generation', fontsize=11)
+    cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{int(round(v))}'))
+
+    fig.suptitle(f'Pareto Front Evolution of {n_pick} Randomly Sampled Time Windows '
+                 f'(bi-objective, L0 as constraint, {n_label}, '
+                 f'pop_size={pop_size}, maxiter={maxiter})',
+                 fontsize=14, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 0.92, 0.95])
+
+    overview_path = os.path.join(out_dir, 'pareto_multi_sample_overview.png')
+    fig.savefig(overview_path, dpi=300, bbox_inches='tight')
+    print(f"  多样本 Pareto 总览图已保存至: {overview_path}")
+    plt.show()
+
+    # ---- 4. 每个抽中样本的独立高清图 ----
+    sample_paths = []
+    for slot in range(n_pick):
+        rec = all_records[picked[slot]]
+        gen_pareto = rec.get('generation_pareto', [])
+        sidx = rec.get('sample_idx', picked[slot])
+
+        # 计算 knee 选中解
+        final_obj = rec.get('final_pareto_obj')
+        sel_obj = None
+        if isinstance(final_obj, np.ndarray) and final_obj.shape[0] > 0:
+            knee_pos = NVITA_NSGA2._select_knee(final_obj, select_mode, knee_min_rse, n_min, n_max)
+            sel_obj = final_obj[knee_pos, :2]
+
+        sp = os.path.join(samples_dir, f'sample_{sidx}.png')
+        plot_pareto_evolution(gen_pareto, n_min=n_min, n_max=n_max, pop_size=pop_size,
+                              save_path=sp, selected_obj=sel_obj)
+        sample_paths.append(sp)
+
+    print(f"  单样本 Pareto 进化图已保存至: {samples_dir}/")
+    for p in sample_paths:
+        print(f"    {p}")
+
+    return overview_path, sample_paths, sampled_indices
+
+
+def plot_sample_pf_evolution_key_gens(all_records, out_dir, n_key_gens=5,
+                                      num_samples=10, seed=42):
+    """逐样本特定代数带连线 Pareto 前沿进化图（2×5 总览 + 单样本高清）
+
+    与 plot_pareto_evolution_key_generations 的区别：
+    - 后者把所有样本的前沿点跨样本聚合后画在一张图上；
+    - 本函数为每个抽中样本各画一张，子图内按关键代数（首代/中间代/末代）分别
+      做二维非支配筛选后画带连线曲线，展示该样本 PF 随代数的收敛趋势。
+
+    返回：(overview_path, sample_paths, sampled_indices)
+    """
+    rng = np.random.default_rng(seed)
+    n_total = len(all_records)
+    if n_total == 0:
+        print("警告: all_records 为空，跳过逐样本关键代数 PF 进化绘图")
+        return None, [], []
+    n_pick = min(num_samples, n_total)
+    picked = rng.choice(n_total, size=n_pick, replace=False)
+    sampled_indices = [int(all_records[i]['sample_idx']) for i in picked]
+    print(f"[plot_sample_pf_key_gens] 抽中 {n_pick} 个样本 (seed={seed}): {sampled_indices}")
+
+    os.makedirs(out_dir, exist_ok=True)
+    samples_dir = os.path.join(out_dir, 'pf_key_gens_samples')
+    os.makedirs(samples_dir, exist_ok=True)
+
+    cmap = plt.get_cmap('viridis')
+    markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'X']
+
+    # ---- 辅助：在给定 ax 上绘制单样本的关键代数 PF 曲线 ----
+    def _draw_one_sample(ax, gen_pareto, sidx, n_gen_total):
+        n_gen = len(gen_pareto)
+        if n_gen < 2:
+            ax.text(0.5, 0.5, f'Sample #{sidx}\n(< 2 gens)', ha='center', va='center',
+                    transform=ax.transAxes, fontsize=9)
+            return []
+        n_key = int(min(max(n_key_gens, 2), n_gen))
+        key_gens = sorted(set(np.linspace(0, n_gen - 1, n_key).round().astype(int).tolist()))
+        plotted = []
+        for k, g in enumerate(key_gens):
+            fd = gen_pareto[g]
+            if fd.shape[0] == 0:
+                continue
+            front = extract_first_front(fd)[:, :2]
+            if front.shape[0] == 0:
+                continue
+            front = front[np.argsort(front[:, 0], kind='stable')]
+            color = cmap(k / max(len(key_gens) - 1, 1))
+            ax.plot(front[:, 0], front[:, 1], '-', color=color, linewidth=1.8, alpha=0.85,
+                    label=f'Gen {g + 1}/{n_gen} ({front.shape[0]})')
+            ax.scatter(front[:, 0], front[:, 1], c=[color],
+                       marker=markers[k % len(markers)], s=40,
+                       edgecolors='k', linewidths=0.4, zorder=3)
+            plotted.append(int(g))
+        ax.set_title(f'Sample #{sidx}', fontsize=10, fontweight='bold')
+        ax.set_xlabel('L2 Norm', fontsize=8)
+        ax.set_ylabel('-RSE', fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.2)
+        ax.legend(fontsize=6, loc='upper right', title='Gen', framealpha=0.7)
+        return plotted
+
+    # ---- 1. 2×5 总览图 ----
+    n_rows, n_cols = 2, 5
+    n_slots = n_rows * n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 10))
+    axes_flat = axes.flatten()
+
+    for slot in range(n_slots):
+        ax = axes_flat[slot]
+        if slot >= n_pick:
+            ax.set_visible(False)
+            continue
+        rec = all_records[picked[slot]]
+        gen_pareto = rec.get('generation_pareto', [])
+        sidx = rec.get('sample_idx', picked[slot])
+        _draw_one_sample(ax, gen_pareto, sidx, len(gen_pareto))
+
+    fig.suptitle('Pareto Front Evolution at Key Generations (per-sample, '
+                 'bi-objective, L0 as constraint)\n'
+                 'Each subplot: one sampled time window, curves = non-dominated fronts '
+                 'at evenly-spaced generations',
+                 fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+
+    overview_path = os.path.join(out_dir, 'pareto_sample_key_gens_overview.png')
+    fig.savefig(overview_path, dpi=300, bbox_inches='tight')
+    print(f"  逐样本关键代数 PF 进化总览图已保存至: {overview_path}")
+    plt.show()
+
+    # ---- 2. 每个抽中样本的独立高清图 ----
+    sample_paths = []
+    for slot in range(n_pick):
+        rec = all_records[picked[slot]]
+        gen_pareto = rec.get('generation_pareto', [])
+        sidx = rec.get('sample_idx', picked[slot])
+
+        fig_s, ax_s = plt.subplots(figsize=(11, 8))
+        plotted = _draw_one_sample(ax_s, gen_pareto, sidx, len(gen_pareto))
+        if not plotted:
+            plt.close(fig_s)
+            continue
+        ax_s.set_xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
+        ax_s.set_ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
+        ax_s.set_title(f'Pareto Front Evolution at Key Generations — Sample #{sidx}\n'
+                       f'(bi-objective, L0 as constraint)', fontsize=13, fontweight='bold')
+        ax_s.legend(fontsize=10, loc='upper right', title='Generation')
+        ax_s.text(0.02, -0.12, f'实际绘制代数（1-based）= {[g + 1 for g in plotted]}；'
+                  '曲线越靠左下方越优',
+                  transform=ax_s.transAxes, fontsize=9, color='dimgray')
+        fig_s.tight_layout()
+
+        sp = os.path.join(samples_dir, f'sample_{sidx}_key_gens.png')
+        fig_s.savefig(sp, dpi=300, bbox_inches='tight')
+        sample_paths.append(sp)
+        plt.close(fig_s)
+
+    print(f"  逐样本关键代数 PF 进化图已保存至: {samples_dir}/")
+    for p in sample_paths:
+        print(f"    {p}")
+
+    return overview_path, sample_paths, sampled_indices
+
+
 # =============================================================================
-# SECTION 7.5: 攻击收敛性与前沿结构高级分析
+# SECTION 5.5: 攻击收敛性与前沿结构高级分析
 # 包含：二维超体积(HV)逐代收敛曲线 / 双目标均值与最优值进化曲线（n_actual 作为约束变量统计）/
-#       每代前沿解数量曲线 / 全局最终前沿主 Pareto 图（按 n_actual 着色）/
+#       全局最终前沿主 Pareto 图（L2 vs -RSE 双目标曲线）/
 #       RSE中位典型样本攻击效果对比 / 扰动位置频次热力图
+# 【双目标改造】已删除三目标版遗留的每代前沿解数量曲线（front0 在三目标下迅速吞没种群，
+# 需监控前沿规模；双目标+L0约束后该诊断不再必要）与 n_actual 颜色条编码；
+# 前沿随代数的演化形状改由 SECTION 5 的 plot_pareto_evolution_key_generations 呈现
 # 全部基于攻击结果数据做后处理（不改动攻击核心逻辑），统计数据持久化到 analysis_data.pkl
 # =============================================================================
 
@@ -1866,7 +1902,8 @@ def compute_generation_metrics(all_generation_pareto):
         obj1_mean / obj1_best / obj2_mean / obj2_best: 双目标每代均值 / 最小值曲线
         n_actual_mean / n_actual_best: 每代前沿 n_actual 均值 / 最小值（constraint variable，非目标）
         obj_mean_per_sample / obj_best_per_sample: 双目标逐样本明细 shape=(n,gen,2)
-        front_size_mean:   每代第一前沿解数量的跨样本均值
+        front_size_mean:   每代第一前沿解数量的跨样本均值（仅作为统计量随 analysis_data.pkl
+                           持久化；原对应的「每代前沿解数量曲线」属三目标版诊断图，已删除）
         n_samples / n_generations: 参与统计的样本数与代数
     """
     valid_recs = [rec for rec in all_generation_pareto
@@ -1973,43 +2010,37 @@ def plot_objective_evolution(generation_metrics, save_path=None):
     plt.show()
 
 
-def plot_pareto_count_evolution(generation_metrics, save_path=None):
-    """绘制每代第一 Pareto 前沿解数量曲线（横轴 = 代数，纵轴 = 平均解数量）"""
-    sizes = np.asarray(generation_metrics['front_size_mean'])
-    gens = np.arange(len(sizes))
-    plt.figure(figsize=(10, 6))
-    plt.plot(gens, sizes, '-s', color='tab:purple', linewidth=2.5, markersize=5,
-             alpha=0.9, label='Mean Front Size')
-    plt.xlabel('Generation', fontsize=13)
-    plt.ylabel('Number of Pareto Solutions', fontsize=13)
-    plt.title('Number of Pareto Front Solutions per Generation', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=11, loc='best')
-    plt.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  前沿解数量曲线已保存至: {save_path}")
-    plt.show()
-
-
 def plot_global_pareto_front(global_front, save_dir):
-    """绘制最终全局 Pareto 前沿的主图（L2 vs -RSE，按 n_actual 着色 + 颜色条）
+    """绘制最终全局 Pareto 前沿主图（L2 vs -RSE 双目标曲线）
 
-    【双目标改造】原 plot_pareto_2d_projections 的三张两两组合投影合并为一张主 Pareto 图，
-    函数随之更名：双目标下前沿本身就是二维平面曲线，n-RSE / n-L2 不再是 Pareto 投影，直接删除。
-    global_front: shape=(k,3)，列顺序 (L2, -RSE, n_actual 附带属性，不参与支配)
+    【双目标改造】① 原 plot_pareto_2d_projections 的三张两两组合投影合并为一张主 Pareto 图，
+    函数随之更名：双目标下前沿本身就是二维平面曲线，n-RSE / n-L2 不再是 Pareto 投影；
+    ② 删除按 n_actual 着色的颜色条——n_actual 已是约束变量而非目标维，不再占据图形编码通道，
+    其均值等统计量仍由 metrics / analysis_data.pkl 持久化。
+    global_front: shape=(k,3)，列顺序 (L2, -RSE, n_actual 附带属性)，只读前两列绘制
     返回实际保存的图片路径列表。
     """
+    pts = np.asarray(global_front, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] < 2:
+        print("警告: 全局前沿数据格式异常，跳过主 Pareto 图绘制")
+        return []
+    pts = pts[:, :2]
+    pts = pts[np.all(np.isfinite(pts), axis=1)]
+    if pts.shape[0] == 0:
+        print("警告: 全局前沿无有效点，跳过主 Pareto 图绘制")
+        return []
+    pts = pts[np.argsort(pts[:, 0], kind='stable')]   # 按 L2 升序，把前沿连成一条曲线
+
     plt.figure(figsize=(10, 7))
-    sc = plt.scatter(global_front[:, 0], global_front[:, 1], c=global_front[:, 2],
-                     cmap='viridis', s=70, alpha=0.9, edgecolors='k', linewidths=0.5)
-    cb = plt.colorbar(sc)
-    cb.set_label('n_actual (constraint variable, sparsity)', fontsize=12)
+    plt.plot(pts[:, 0], pts[:, 1], '-', color='tab:blue', linewidth=2.0, alpha=0.8,
+             zorder=1, label='Global final Pareto front')
+    plt.scatter(pts[:, 0], pts[:, 1], c='tab:blue', s=70, alpha=0.9,
+                edgecolors='k', linewidths=0.5, zorder=2)
     plt.xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
     plt.ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
-    plt.title('Global Pareto Front: L2 Norm vs -RSE (colored by sparsity n, L0 as constraint)',
+    plt.title('Global Final Pareto Front: L2 Norm vs -RSE (L0 as constraint)',
               fontsize=13, fontweight='bold')
+    plt.legend(fontsize=10, loc='upper right')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     save_path = os.path.join(save_dir, 'pareto_l2_rse.png')
@@ -2171,12 +2202,18 @@ def plot_sample_attack_compare(model, X_eval, Y_eval, X_adv_total, metrics,
 
 
 # =============================================================================
-# SECTION 8: 攻击效果评估
+# SECTION 6: 攻击效果评估
 # =============================================================================
 
 def evaluate_attack(model, X_test, Y_test, X_adv, min_speed, max_speed, attack_name, device):
     """
-    评估攻击性能，返回指标字典
+    评估攻击性能，返回指标字典。
+
+    在原有 MAE / RMSE / MAPE / RSE 基础上补充 R2（决定系数），并统一给出每个指标
+    「攻击前(clean) → 攻击后(adv)」的绝对变化量 Δ 与相对变化率(%)，用于量化对抗攻击
+    对风速预测精度的破坏程度：
+      - 误差类指标(MAE / RMSE / MAPE)：变化率 > 0 表示攻击后误差上升（性能恶化）；
+      - 拟合优度 R2：变化率 < 0 表示攻击后拟合变差，其下降率取正值表示下降幅度。
     """
     model.to(device)
     model.eval()
@@ -2190,39 +2227,75 @@ def evaluate_attack(model, X_test, Y_test, X_adv, min_speed, max_speed, attack_n
     Y_pred_clean_denorm = Y_pred_clean * (max_speed - min_speed) + min_speed
     Y_pred_adv_denorm = Y_pred_adv * (max_speed - min_speed) + min_speed
 
+    # ---------- 攻击前（clean）指标 ----------
     mae_clean = mean_absolute_error(Y_test_denorm, Y_pred_clean_denorm)
     rmse_clean = np.sqrt(mean_squared_error(Y_test_denorm, Y_pred_clean_denorm))
     mape_clean = np.mean(np.abs((Y_test_denorm - Y_pred_clean_denorm) / Y_test_denorm)) * 100
+    r2_clean = r2_score(Y_test_denorm, Y_pred_clean_denorm)
 
+    # ---------- 攻击后（adv）指标 ----------
     mae_adv = mean_absolute_error(Y_test_denorm, Y_pred_adv_denorm)
     rmse_adv = np.sqrt(mean_squared_error(Y_test_denorm, Y_pred_adv_denorm))
     mape_adv = np.mean(np.abs((Y_test_denorm - Y_pred_adv_denorm) / Y_test_denorm)) * 100
+    r2_adv = r2_score(Y_test_denorm, Y_pred_adv_denorm)
 
     # RSE = rmse_adv / rmse_clean（和 nVITA 原论文一致，统一口径）
     rse_clean = 1.0  # 干净预测的 RSE 恒为 1（rmse_clean / rmse_clean）
     rse_adv = rmse_adv / rmse_clean if rmse_clean > 0 else 0
 
-    drop_rmse = (rmse_adv - rmse_clean) / rmse_clean * 100
+    def _rel_change(clean, adv):
+        """相对变化率(%) = (adv - clean) / |clean| * 100；clean≈0 时返回 0 以避免除零。"""
+        return (adv - clean) / abs(clean) * 100 if abs(clean) > 1e-12 else 0.0
 
-    print(f"\n{'=' * 50}")
+    # ---------- 攻击前后变化量 Δ(=adv-clean) 与相对变化率(%) ----------
+    delta_mae = mae_adv - mae_clean
+    delta_rmse = rmse_adv - rmse_clean
+    delta_mape = mape_adv - mape_clean
+    delta_r2 = r2_adv - r2_clean
+
+    chg_mae_pct = _rel_change(mae_clean, mae_adv)      # >0 表示误差恶化
+    chg_rmse_pct = _rel_change(rmse_clean, rmse_adv)   # >0 表示误差恶化
+    chg_mape_pct = _rel_change(mape_clean, mape_adv)   # >0 表示误差恶化
+    chg_r2_pct = _rel_change(r2_clean, r2_adv)         # <0 表示拟合变差
+    drop_r2_pct = -chg_r2_pct                          # R2 下降率（正值=下降幅度）
+
+    print(f"\n{'=' * 70}")
     print(f"攻击评估: {attack_name}")
-    print(f"{'=' * 50}")
-    print(f"清洁预测  - MAE: {mae_clean:.4f}, RMSE: {rmse_clean:.4f}, MAPE: {mape_clean:.2f}%, RSE: {rse_clean:.4f}")
-    print(f"对抗预测  - MAE: {mae_adv:.4f}, RMSE: {rmse_adv:.4f}, MAPE: {mape_adv:.2f}%, RSE: {rse_adv:.4f}")
-    print(f"RMSE 下降率: {drop_rmse:.2f}%")
-    print(f"{'=' * 50}")
+    print(f"{'=' * 70}")
+    print(f"{'Metric':<10}{'Clean':>14}{'Adv':>14}{'Delta':>14}{'Change%':>14}")
+    print(f"{'-' * 70}")
+    print(f"{'MAE':<10}{mae_clean:>14.4f}{mae_adv:>14.4f}{delta_mae:>+14.4f}{chg_mae_pct:>+13.2f}%")
+    print(f"{'RMSE':<10}{rmse_clean:>14.4f}{rmse_adv:>14.4f}{delta_rmse:>+14.4f}{chg_rmse_pct:>+13.2f}%")
+    print(f"{'MAPE(%)':<10}{mape_clean:>14.2f}{mape_adv:>14.2f}{delta_mape:>+14.2f}{chg_mape_pct:>+13.2f}%")
+    print(f"{'R2':<10}{r2_clean:>14.4f}{r2_adv:>14.4f}{delta_r2:>+14.4f}{chg_r2_pct:>+13.2f}%")
+    print(f"{'RSE':<10}{rse_clean:>14.4f}{rse_adv:>14.4f}{rse_adv - rse_clean:>+14.4f}{'--':>14}")
+    print(f"{'-' * 70}")
+    print(f"注: MAE/RMSE/MAPE 的 Change%>0 表示攻击后误差上升(性能恶化);")
+    print(f"    R2 的 Change%<0 表示拟合优度下降, 下降率 = {drop_r2_pct:.2f}% (正值=下降幅度)")
+    print(f"{'=' * 70}")
 
     return {
         'attack_name': attack_name,
-        'mae_clean': mae_clean, 'rmse_clean': rmse_clean, 'mape_clean': mape_clean, 'rse_clean': rse_clean,
-        'mae_adv': mae_adv, 'rmse_adv': rmse_adv, 'mape_adv': mape_adv, 'rse_adv': rse_adv,
-        'drop_rmse_pct': drop_rmse
+        # 攻击前(clean)
+        'mae_clean': mae_clean, 'rmse_clean': rmse_clean, 'mape_clean': mape_clean,
+        'r2_clean': r2_clean, 'rse_clean': rse_clean,
+        # 攻击后(adv)
+        'mae_adv': mae_adv, 'rmse_adv': rmse_adv, 'mape_adv': mape_adv,
+        'r2_adv': r2_adv, 'rse_adv': rse_adv,
+        # 变化量 Δ(=adv-clean)
+        'delta_mae': delta_mae, 'delta_rmse': delta_rmse,
+        'delta_mape': delta_mape, 'delta_r2': delta_r2,
+        # 相对变化率(%)：误差类>0=恶化；R2<0=拟合变差
+        'chg_mae_pct': chg_mae_pct, 'chg_rmse_pct': chg_rmse_pct,
+        'chg_mape_pct': chg_mape_pct, 'chg_r2_pct': chg_r2_pct,
+        # R2 下降率(%) 与兼容旧字段 drop_rmse_pct
+        'drop_r2_pct': drop_r2_pct, 'drop_rmse_pct': chg_rmse_pct,
     }
 
 
 
 # =============================================================================
-# SECTION 9: REPORT GENERATION
+# SECTION 7: REPORT GENERATION
 # =============================================================================
 
 def generate_comprehensive_report(model, test_loader, val_loader, device, min_speed, max_speed,
@@ -2376,7 +2449,7 @@ def generate_comprehensive_report(model, test_loader, val_loader, device, min_sp
 
 
 # =============================================================================
-# SECTION 10: MAIN PROGRAM
+# SECTION 8: MAIN PROGRAM
 # =============================================================================
 
 def main():
@@ -2402,6 +2475,8 @@ def main():
                         help="最终解选择策略: 'knee'=双目标归一化折中膝点（n_actual 作 tie-break） / 'max_rse'=攻击强度上界端点")
     parser.add_argument('--knee_min_rse', type=float, default=NSGA2_CONFIG['knee_min_rse'],
                         help='膝点有效性下界：仅 RSE>=该值的前沿点可作膝点候选')
+    parser.add_argument('--num_eval_samples', type=int, default=NSGA2_CONFIG['num_eval_samples'],
+                        help='参加 NSGA-II 评估的样本数量（默认 None=全部，正整数则从数据池头部截取）')
     # ====== 模型冻结与复用参数 ======
     parser.add_argument('--save_model', type=str, default=None,
                         help='Path to save the trained model checkpoint (model weights + architecture params)')
@@ -2463,21 +2538,16 @@ def main():
     feature_columns = data_result['feature_columns']
 
     # Extract test data for attack evaluation
-    # 攻击评估数据池 = 验证集(15%) + 测试集(15%)，按时序拼接
+    # 攻击评估数据池 = 测试集（与「测试集性能」同口径，仅用测试集，不再拼接验证集）
     # （LBA 管线已移除，不再需要为 LBA 训练预留前 adv_cnt 个样本，整个数据池直接用于攻击评估）
     test_loader_for_attack = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False)
     X_test_full, Y_test_full = next(iter(test_loader_for_attack))
     X_test_full = X_test_full.to(DEVICE)
     Y_test_full = Y_test_full.to(DEVICE)
 
-    val_loader_for_attack = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False)
-    X_val_full, Y_val_full = next(iter(val_loader_for_attack))
-    X_val_full = X_val_full.to(DEVICE)
-    Y_val_full = Y_val_full.to(DEVICE)
-
-    X_attack_pool = torch.cat([X_val_full, X_test_full], dim=0)
-    Y_attack_pool = torch.cat([Y_val_full, Y_test_full], dim=0)
-    print(f"\n[攻击数据池] 验证集 {len(X_val_full)} + 测试集 {len(X_test_full)} = 总计 {len(X_attack_pool)} 个样本")
+    X_attack_pool = X_test_full
+    Y_attack_pool = Y_test_full
+    print(f"\n[攻击数据池] 测试集 {len(X_attack_pool)} 个样本（与「测试集性能」同口径，仅测试集）")
 
     # ====== 判断是否触发 load_model 模式 ======
     load_model_mode = args.load_model is not None and os.path.isfile(args.load_model)
@@ -2515,7 +2585,7 @@ def main():
             model = HybridCNNBiLSTM(topo, cnn_params, lstm_params, num_features, SEQUENCE_LENGTH).to(DEVICE)
             model.load_state_dict(checkpoint['model_state_dict'])
             model.eval()
-            print(">>> 模型加载成功！已跳过 NSGA-II 搜索和最终训练阶段。")
+            print(">>> 模型加载成功！已跳过模型训练阶段。")
             print(f'\n  已加载模型的混合编码向量:')
             print(f'    topo:    {topo}')
             print(f'    CNN:     {cnn_params}')
@@ -2677,7 +2747,7 @@ def main():
 
             test_performance = {'mae': mae_test, 'rmse': rmse_test, 'mape': mape_test}
 
-            # 固定编码模式不绘制结构搜索 Pareto 前沿相关图像
+            # 本文件已删除结构搜索代码，无模型架构层面的 Pareto 前沿图可绘制
 
             # 保存结果
             with open(f'{prefix}modeo_cnn_optimization_continuous_lr.pkl', 'wb') as f:
@@ -2727,7 +2797,7 @@ def main():
             })
             test_results_df.to_csv(f'{prefix}test_set_wind_speed_predictions.csv', index=False, encoding='utf-8-sig')
 
-            # 固定编码模式不存在结构搜索 Pareto 前沿，无需保存每代 CSV
+            # 本文件已删除结构搜索代码，无架构 Pareto 前沿，无需保存每代 CSV
         # ====== if/else 块结束 ======
 
         # ==================== Attack Phase ====================
@@ -2737,10 +2807,17 @@ def main():
             print(f"开始 NSGA-II 双目标变长稀疏攻击评估（L0 作为约束） (第 {run_id + 1} 次运行)")
             print(f"{'=' * 80}")
 
-            # 攻击评估数据 = 验证集 + 测试集拼接的完整数据池
+            # 攻击评估数据 = 测试集（与「测试集性能」同口径）
             feature_ranges = np.ones(num_features)
-            X_eval = X_attack_pool
-            Y_eval = Y_attack_pool
+            # 按配置截取评估样本子集（None / <=0 表示使用全部）
+            if args.num_eval_samples is not None and args.num_eval_samples > 0:
+                n_take = min(args.num_eval_samples, X_attack_pool.shape[0])
+                X_eval = X_attack_pool[:n_take]
+                Y_eval = Y_attack_pool[:n_take]
+                print(f"[评估样本截取] 从数据池 {X_attack_pool.shape[0]} 个样本中截取前 {n_take} 个参与 NSGA-II 评估")
+            else:
+                X_eval = X_attack_pool
+                Y_eval = Y_attack_pool
 
             print(f"\nNSGA-II 攻击配置: 变长编码 n∈[{args.n_min},{args.n_max}]（L0 约束）, "
                   f"pop_size={args.pop_size}, maxiter={args.maxiter}, beta={args.beta}, "
@@ -2758,7 +2835,7 @@ def main():
                 select_mode=args.select_mode,
                 knee_min_rse=args.knee_min_rse,
                 insert_prob=NSGA2_CONFIG['insert_prob'],
-                delete_prob=NSGA2_CONFIG['delete_prob']
+                delete_prob=NSGA2_CONFIG['delete_prob'],
             )
 
             # 评估攻击效果
@@ -2778,6 +2855,10 @@ def main():
             print(f"干净预测 RMSE: {clean_rmse:.4f} m/s")
             print(f"攻击后 RMSE:   {adv_rmse:.4f} m/s")
             print(f"RSE:            {rse:.4f}")
+            print(f"R2:   干净 {attack_results['r2_clean']:.4f} → 攻击后 {attack_results['r2_adv']:.4f} "
+                  f"(下降率 {attack_results['drop_r2_pct']:.2f}%)")
+            print(f"MAPE: 干净 {attack_results['mape_clean']:.2f}% → 攻击后 {attack_results['mape_adv']:.2f}% "
+                  f"(变化率 {attack_results['chg_mape_pct']:+.2f}%)")
             print(f"前沿平均扰动 L2:  {metrics['mean_l2_norm']:.6f}")
             print(f"--- 选中解统计（双目标 + 约束变量） ---")
             print(f"  obj1 扰动 L2 范数:     {metrics['mean_sel_l2_norm']:.6f}")
@@ -2807,14 +2888,37 @@ def main():
                         pop_size=args.pop_size,
                         save_path=f'{pareto_save_dir}/pareto_evolution.png'
                     )
+                # 关键代数 Pareto 前沿对比图（跨样本聚合，首代/中间代/末代各一条带连线曲线）
+                plot_pareto_evolution_key_generations(
+                    all_generation_pareto,
+                    save_path=f'{pareto_save_dir}/pareto_evolution_key_generations.png'
+                )
                 # 保存所有样本的 Pareto 数据
                 with open(f'{pareto_save_dir}/pareto_evolution_data.pkl', 'wb') as f:
                     pickle.dump(all_generation_pareto, f)
                 print(f"Pareto 进化数据已保存至: {pareto_save_dir}/pareto_evolution_data.pkl")
 
-            # ==================== 高级攻击分析：收敛性 / 二维投影 / 样本级可视化 ====================
+                # 多样本 Pareto 前沿进化总览（随机抽取 10 个时间窗口，2×5 子图 + 单样本高清）
+                plot_multi_sample_pf_evolution(
+                    all_generation_pareto,
+                    n_label=f'n∈[{args.n_min},{args.n_max}]',
+                    pop_size=args.pop_size, maxiter=args.maxiter,
+                    out_dir=pareto_save_dir,
+                    select_mode=args.select_mode, knee_min_rse=args.knee_min_rse,
+                    n_min=args.n_min, n_max=args.n_max,
+                    num_samples=10, seed=args.seed
+                )
+
+                # 逐样本特定代数带连线 PF 进化图（展示每个样本的 PF 收敛趋势）
+                plot_sample_pf_evolution_key_gens(
+                    all_generation_pareto,
+                    out_dir=pareto_save_dir,
+                    n_key_gens=5, num_samples=10, seed=args.seed
+                )
+
+            # ==================== 高级攻击分析：收敛性 / 前沿结构 / 样本级可视化 ====================
             # 全部基于攻击结果数据做后处理（不改动攻击核心逻辑），默认自动执行
-            print(f"\n正在生成高级攻击分析图表（收敛曲线 / 二维投影 / 样本级可视化）...")
+            print(f"\n正在生成高级攻击分析图表（收敛曲线 / 前沿结构 / 样本级可视化）...")
             analysis_data = {
                 'config': {
                     'n_min': args.n_min, 'n_max': args.n_max,
@@ -2823,7 +2927,7 @@ def main():
                 },
             }
 
-            # 一、收敛性量化分析（二维 HV / 双目标均值与最优值 / 前沿解数量 / n_actual 约束统计，逐样本计算后跨样本平均）
+            # 一、收敛性量化分析（二维 HV / 双目标均值与最优值 / n_actual 约束统计，逐样本计算后跨样本平均）
             generation_metrics = compute_generation_metrics(all_generation_pareto)
             if generation_metrics is not None:
                 analysis_data['generation_metrics'] = generation_metrics
@@ -2834,11 +2938,9 @@ def main():
                                     save_path=f'{pareto_save_dir}/hv_convergence.png')
                 plot_objective_evolution(generation_metrics,
                                          save_path=f'{pareto_save_dir}/objective_evolution.png')
-                plot_pareto_count_evolution(generation_metrics,
-                                            save_path=f'{pareto_save_dir}/pareto_count_evolution.png')
 
-            # 二、最终全局 Pareto 前沿主图（L2 vs -RSE，按 n_actual 着色 + 颜色条；原三张两两投影合并为一张）
-            #     双目标下 n_actual 仅为约束变量，图上以颜色条呈现，不再占据坐标轴
+            # 二、最终全局 Pareto 前沿主图（L2 vs -RSE 双目标曲线；原三张两两投影合并为一张）
+            #     n_actual 仅为约束变量，已从图形编码通道（颜色条）移除，只保留统计量
             global_front = metrics.get('global_final_pareto_obj')
             if isinstance(global_front, np.ndarray) and global_front.shape[0] > 0:
                 analysis_data['global_final_pareto_obj'] = global_front
@@ -2897,8 +2999,10 @@ def main():
         if not args.no_attack:
             print(f"  - NSGA2攻击结果: {prefix}nsga2_attack_results.pkl")
             print(f"  - Pareto进化图: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution.png")
+            print(f"  - 关键代数Pareto前沿对比图: "
+                  f"{OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_key_generations.png")
             print(f"  - Pareto进化数据: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_data.pkl")
-            print(f"  - 高级分析图(HV收敛/双目标进化/前沿数量/主Pareto图/样本对比/热力图): {OUTPUT_DIR}/run{run_id + 1}/")
+            print(f"  - 高级分析图(HV收敛/双目标进化/主Pareto图/样本对比/热力图): {OUTPUT_DIR}/run{run_id + 1}/")
             print(f"  - 高级分析数据: {OUTPUT_DIR}/run{run_id + 1}/analysis_data.pkl")
         print(f"{'=' * 80}")
 
