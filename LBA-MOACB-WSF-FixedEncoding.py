@@ -11,7 +11,7 @@ MoACB-WSF with Fixed Manual Encoding (NSGA-II 变长编码双目标稀疏攻击�
    calc_perturb_rmse / evaluate_lba_fitting_quality / run_lba_attack / run_lba_pipeline 等函数，
    全部 LBA 可视化函数与 LBA_CONFIG 全局配置，以及 main() 中的 LBA 分支与 LBA 命令行参数。
    保留：数据加载/归一化/划分、HybridCNNBiLSTM 固定编码训练与评估、evaluate_attack、
-        run_nsga2_standalone_attack、plot_pareto_evolution。
+        run_nsga2_standalone_attack、plot_sample_pf_evolution_key_gens、plot_perturb_position_heatmap。
 2.【变长编码】NVITA_NSGA2 由固定 n 组三元组改为可变长度三元组编码：
    个体 = [t1,f1,p1, t2,f2,p2, ..., tn,fn,pn]，总长度 3n 随 n 动态变化，
    n ∈ [n_min, n_max]，由初始化随机采样、插入变异(n+1)、删除变异(n-1)共同驱动；
@@ -24,16 +24,13 @@ MoACB-WSF with Fixed Manual Encoding (NSGA-II 变长编码双目标稀疏攻击�
    非支配排序采用 Deb 约束支配（可行优先 → 二维目标支配 → 违约度比较）。
    删除冗余的第三目标维度可避免第一前沿过早吞没整个种群，拥挤距离 / 锦标赛 /
    环境选择均按 2 个目标计算。
-4.【分析扩展】攻击高级分析模块（SECTION 5 / 5.5）：二维超体积 HV 逐代收敛曲线、双目标均值/最优值
-   进化曲线（每代 n_actual 均值作为约束变量统计一并输出）、单样本全代际 Pareto 进化散点图、
-   关键代数 Pareto 前沿对比图（跨样本聚合，首代/中间代/末代各一条带连线曲线，
-   展示前沿随代数向左下收敛）、
-   全局最终前沿主 Pareto 图（L2 vs -RSE 双目标曲线）、
-   RSE 中位典型样本攻击前后预测对比、扰动位置 (t,f) 频次热力图；图片输出到 output/run{id}/，
+4.【分析扩展】攻击高级分析模块（SECTION 5 / 5.5）：二维超体积 HV、双目标均值/最优值、每代 n_actual
+   均值等收敛统计仅打印到控制台并持久化（不再绘图）；本项目仅保留两张攻击可视化图——
+   ① 关键代数带连线 PF 进化总览图（随机抽取 10 个样本，2×5 子图合并为单张，展示前沿随代数向左下收敛）、
+   ② 全局 Pareto 前沿扰动位置 (t,f) 频次热力图；图片输出到 output/run{id}/，
    统计数据统一持久化到 output/run{id}/analysis_data.pkl。
-   【三目标遗留清理】已删除「每代前沿解数量曲线」（三目标下 front0 迅速吞没种群才需监控
-   前沿规模，现仅作为统计量保留在 generation_metrics）与两张图上的 n_actual 颜色条
-   （n_actual 是约束变量而非目标维，不再占据图形编码通道）。
+   【可视化精简】已删除单样本散点进化 / 跨样本关键代数对比 / 散点式多样本总览 / HV 收敛曲线 /
+   双目标进化曲线 / 全局前沿主图 / RSE 中位典型样本对比等绘图函数，仅保留上述两张图。
 5.【删除结构搜索】MoACB-WSF 的「模型自动设计」部分已整体移除，本文件只保留「输入编码 → 具体模型」链路：
    删除 initialize_individual / initialize_population / generate_valid_topology /
    variable_length_mutation / crossover_population（随机种群与架构进化算子）、
@@ -141,32 +138,46 @@ BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 # 【变长编码】n_min / n_max 取代原固定 n：每个个体独立采样扰动点数 n ∈ [n_min, n_max]
 NSGA2_CONFIG = {
     'n_min': 1,      # 变长编码：扰动点数下界（时序稀疏攻击场景默认 1）
-    'n_max': 10,      # 变长编码：扰动点数上界（时序稀疏攻击场景默认 6）
-    'beta': 0.3,     # nVITA perturbation budget factor (原论文 β)
-    'maxiter': 10,   # NSGA-II max generations
-    'pop_size': 10,  # NSGA-II population size（增大可提升搜索覆盖度，但每代计算量线性增加）
+    'n_max': 7,      # 变长编码：扰动点数上界（时序稀疏攻击场景默认 6）
+    'beta': 0.01,     # nVITA perturbation budget factor (原论文 β)
+    'maxiter': 100,   # NSGA-II max generations
+    'pop_size': 40,  # NSGA-II population size（增大可提升搜索覆盖度，但每代计算量线性增加）
     'insert_prob': 0.1,  # 变长编码：插入变异概率（n+1）
     'delete_prob': 0.2,  # 变长编码：删除变异概率（n-1）【方案A】0.1→0.2：加速不可行解(n<n_min)在种群中积累，使 Deb 约束支配更快发挥作用
-    'select_mode': 'knee',   # 最终解选择策略：'knee'=归一化折中膝点 / 'max_rse'=攻击强度上界端点
+    'select_mode': 'max_rse',   # 最终解选择策略：'knee'=归一化折中膝点 / 'max_rse'=攻击强度上界端点
     'knee_min_rse': 1,     # 膝点有效性下界：仅 RSE>=该值的前沿点可作膝点候选
     'num_eval_samples': None, # 参加 NSGA-II 评估的样本数量（None 或 <=0 表示使用数据池全部样本，正整数则从数据池头部截取该数量的样本）
+
+    # ===== 敏感度引导退火（新增）=====
+    # 攻击前用 seq_len*num_features 次前向查询估计每个位置的敏感度，取 top-K 建候选池；
+    # 初始化与变异选新位置时按 guided_ratio 概率从候选池选，其余随机；
+    # guided_ratio 随代数从 guided_ratio_start 线性退火到 guided_ratio_end
+    # （前 30% 代保持 start，后 70% 代线性衰减）。
+    # use_sensitivity_init=False 时完全回退到原有 CMO-IABA + 随机逻辑（总开关）。
+    'use_sensitivity_init': True,
+    'candidate_pool_size': 40,
+    'guided_ratio_start': 0.6,
+    'guided_ratio_end': 0.3,
 }
+
+# 扰动幅值 p 的离散档位数（20 档位整数编码）
+P_DISCRETE_LEVELS = 40
 
 # ==================== FIXED MANUAL ENCODING FROM PAPER ====================
 # 论文表 "BEST TRADE-OFF HYBRID ENCODING VECTORS OBTAINED BY THE PROPOSED MoACB-WSF"
 # Dataset: Sotavento 10-min Dataset
 FIXED_ENCODING = {
-    'topo': [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+    'topo': [1, 0, 1, 1, 1, 0, 1, 1, 1, 1],
     'cnn_params': [
-        [0, 0, 1, 0, 1],   # CNN module 0
-        [1, 3, 4, 1, 1],   # CNN module 1
-        [3, 0, 3, 1, 1],   # CNN module 2
+        [0, 2, 3, 2, 0],   # CNN module 0
+        [1, 1, 6, 0, 1],   # CNN module 1
+        [2, 0, 4, 0, 2],   # CNN module 2
     ],
     'lstm_params': [
-        [0, 0, 7, 1, 0],   # BiLSTM module 0 (module index 3)
-        [0, 0, 0, 1, 2],   # BiLSTM module 1 (module index 4)
+        [0, 0, 6, 0, 3],   # BiLSTM module 0 (module index 3)
+        [0, 1, 4, 0, 0],   # BiLSTM module 1 (module index 4)
     ],
-    'setting': [0, 0, 0.0072, 3],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
+    'setting': [0, 1, 0.0007425602587, 0],  # batch_size=32, SGD, lr=0.0072, regularizer=L1L2
 }
 
 
@@ -486,7 +497,9 @@ class NVITA_NSGA2:
                  eta_c=15, eta_m=20, crossover_prob=0.9,
                  feature_constraint=None, perturb_features=None,
                  use_window_range=True, init_strategy='random', select_mode='knee',
-                 knee_min_rse=2.0, insert_prob=0.1, delete_prob=0.1):
+                 knee_min_rse=2.0, insert_prob=0.1, delete_prob=0.1,
+                 use_sensitivity_init=True, candidate_pool_size=20,
+                 guided_ratio_start=0.6, guided_ratio_end=0.3):
         # ====== 【变长编码】用 [n_min, n_max] 区间取代原固定 self.n ======
         self.n_min = max(1, int(n_min))            # 扰动点数下界
         self.n_max = max(self.n_min, int(n_max))   # 扰动点数上界（自动纠正 n_min > n_max 的误配置）
@@ -508,6 +521,11 @@ class NVITA_NSGA2:
         self.insert_prob = insert_prob      # 插入变异概率：随机新增一个三元组，n+1
         self.delete_prob = delete_prob      # 删除变异概率：随机删除一个三元组，n-1
 
+        # ====== 【CMO-IABA】自适应区域成功计数（attack() 每样本重置；此处给默认值，防止独立调用 _mutation 报错）======
+        self.t_success = np.zeros(1)        # 每个时间步的成功变异累计次数
+        self.f_success = np.zeros(1)        # 每个特征的成功变异累计次数
+        self.total_success = 0              # 总成功次数（>20 后才启用概率引导）
+
         # ====== 【查询计数 / clean 缓存】（第8点：clean 每样本只查一次并缓存）======
         self.query_count = 0                 # 当前样本累计模型前向查询数（attack 开头重置）
         self.first_success_query = -1        # 首次出现 RSE>=knee_min_rse 个体时的累计查询数（未达标记 -1）
@@ -515,6 +533,22 @@ class NVITA_NSGA2:
 
         # ====== 【过程诊断】截断率/预算截断率/空个体率计数（attack 内累计，不影响数值）======
         self.diag = None
+
+        # ====== 【敏感度引导退火】总开关与退火参数（新增）======
+        # use_sensitivity_init=True：attack() 每样本先探测 seq_len*num_features 个位置的敏感度，
+        #   取 top-candidate_pool_size 建候选池；_init_individual / _mutation 选新位置时按 guided_ratio
+        #   概率从候选池选，其余随机；guided_ratio 随代数从 guided_ratio_start 线性退火到 guided_ratio_end。
+        # use_sensitivity_init=False：完全回退到原有 CMO-IABA + 随机位置采样逻辑，等价于关闭本机制。
+        self.use_sensitivity_init = bool(use_sensitivity_init)
+        self.candidate_pool_size = int(candidate_pool_size)
+        self.guided_ratio_start = float(guided_ratio_start)
+        self.guided_ratio_end = float(guided_ratio_end)
+        self.candidate_pool = []       # [(t,f), ...] 运行时由 attack() 逐样本填充
+        self.current_gen = 0           # 当前进化代数，用于退火计算，由 attack() 主循环每代更新
+        # 每样本上下文（由 attack() 在探测前赋值；此处给默认值防独立调用报错）
+        self.seq_len = 0
+        self.num_features = 0
+        self.device = None
 
     def _get_window_range(self, x_np):
         """计算当前样本每个特征的窗口极差（对齐官方 calculate_test_window_ranges）"""
@@ -535,6 +569,20 @@ class NVITA_NSGA2:
         return np.random.choice(num_features, self.feature_constraint, replace=False)
 
     @staticmethod
+    def _quantize_p(p_value, budget):
+        """将实数 p 量化到 [-budget, budget] 上最近的离散值（P_DISCRETE_LEVELS 档等间隔）
+        用于 _clip_tf_budget 修复、变异后约束，保证 p 恒为离散值之一。
+        budget<=0 时返回 0.0。
+        """
+        if budget < 1e-12:
+            return 0.0
+        n = P_DISCRETE_LEVELS
+        idx = int(np.clip(
+            np.round((p_value + budget) / (2 * budget) * (n - 1)),
+            0, n - 1))
+        return float(-budget + idx * (2 * budget) / (n - 1))
+
+    @staticmethod
     def _num_points(individual):
         """【变长编码】由向量长度反解当前个体的扰动点数 n = len(individual) // 3"""
         return len(individual) // 3
@@ -551,20 +599,117 @@ class NVITA_NSGA2:
             f = int(np.random.choice(allowed_features))
             if (t, f) not in existing:
                 budget = self.epsilon * ranges[f]
-                p = float(np.random.uniform(-budget, budget)) if budget > 0 else 0.0
+                if budget > 0:
+                    values = np.linspace(-budget, budget, P_DISCRETE_LEVELS)
+                    p = float(np.random.choice(values))
+                else:
+                    p = 0.0
                 return [float(t), float(f), p], (t, f)
         # 兜底：位置空间被占满时允许重复，交由 _repair_unique 合并幅值
         t = int(np.random.randint(0, seq_len))
         f = int(np.random.choice(allowed_features))
         budget = self.epsilon * ranges[f]
-        p = float(np.random.uniform(-budget, budget)) if budget > 0 else 0.0
+        if budget > 0:
+            values = np.linspace(-budget, budget, P_DISCRETE_LEVELS)
+            p = float(np.random.choice(values))
+        else:
+            p = 0.0
         return [float(t), float(f), p], (t, f)
 
+    def _compute_sensitivity(self, x_window, pred_clean, ranges, allowed_features=None):
+        """【敏感度引导退火 / 探测】对每个位置 (t,f) 单独施加固定小扰动，观察模型输出变化的绝对值。
+        仅用前向查询，完全黑盒；探测扰动大小 = 0.5 * epsilon * ranges[f]（中间档，避免饱和）。
+        参数：
+            x_window: shape=(seq_len, num_features) 的干净窗口（2D）
+            pred_clean: 干净窗口下的模型预测标量
+            ranges: shape=(num_features,) 逐特征预算基底（use_window_range=False 时为全局 range_f）
+            allowed_features: 允许扰动的特征索引集合（None 表示全部），非法特征敏感度保持 0
+        返回：敏感度矩阵 shape=(seq_len, num_features)
+        """
+        if allowed_features is None:
+            allowed_set = set(range(self.num_features))
+        else:
+            allowed_set = set(int(f) for f in np.asarray(allowed_features).flatten().tolist())
+        sensitivity = np.zeros((self.seq_len, self.num_features), dtype=float)
+        x_base = np.asarray(x_window, dtype=float).copy()
+        ranges_arr = np.asarray(ranges, dtype=float)
+        for t in range(self.seq_len):
+            for f in range(self.num_features):
+                if f not in allowed_set:
+                    continue
+                delta = 0.5 * self.epsilon * float(ranges_arr[f])
+                x_test = x_base.copy()
+                x_test[t, f] += delta
+                with torch.no_grad():
+                    pred_test = self.model(
+                        torch.FloatTensor(x_test[None]).to(self.device)).item()
+                self.query_count += 1
+                sensitivity[t, f] = abs(pred_test - pred_clean)
+        return sensitivity
+    
+    def _build_candidate_pool(self, sensitivity, k):
+        """【敏感度引导退火 / 候选池】把 seq_len × num_features 个位置按敏感度降序排列，取 top-k 组成候选池。
+        返回：[(t, f), ...] 长度 <= k 的位置列表（敏感度相同时保持排序稳定性）。
+        """
+        positions = [(float(sensitivity[t, f]), int(t), int(f))
+                     for t in range(self.seq_len)
+                     for f in range(self.num_features)]
+        positions.sort(reverse=True, key=lambda x: x[0])
+        kk = max(0, min(int(k), len(positions)))
+        return [(t, f) for (_s, t, f) in positions[:kk]]
+    
+    def _sample_new_position(self, seen, allowed_features=None):
+        """【敏感度引导退火 / 采样】选择新位置的统一入口（含退火）：
+            - guided_ratio 概率从候选池均匀随机选（排除 seen）
+            - (1 - guided_ratio) 概率从全部 seq_len × |allowed_features| 位置随机选（排除 seen）
+        guided_ratio 随代数退火：前 30% 代保持 guided_ratio_start，后 70% 代线性衰减到 guided_ratio_end。
+        参数：
+            seen: 已占用位置集合 set of (t,f)，采样时排除
+            allowed_features: 允许扰动的特征索引（None / 空 表示全部特征）
+        返回：(t, f) 二元组（int）
+        """
+        # ---- 退火计算 ----
+        denom = max(int(self.maxiter), 1)
+        gen_ratio = float(self.current_gen) / denom
+        if gen_ratio < 0.3:
+            guided_ratio = self.guided_ratio_start
+        else:
+            decay_progress = (gen_ratio - 0.3) / 0.7
+            guided_ratio = self.guided_ratio_start - \
+                decay_progress * (self.guided_ratio_start - self.guided_ratio_end)
+    
+        if allowed_features is not None and len(allowed_features) > 0:
+            allowed_arr = np.asarray(allowed_features, dtype=int).flatten()
+        else:
+            allowed_arr = np.arange(self.num_features, dtype=int)
+        if allowed_arr.size == 0 or self.seq_len <= 0:
+            return (0, 0)
+    
+        # ---- 引导采样：从候选池均匀随机选（排除 seen）----
+        if np.random.random() < guided_ratio and self.candidate_pool:
+            pool = [(t, f) for (t, f) in self.candidate_pool if (t, f) not in seen]
+            if pool:
+                idx = int(np.random.randint(0, len(pool)))
+                return (int(pool[idx][0]), int(pool[idx][1]))
+    
+        # ---- 随机采样：从全部位置随机选（限定 allowed_features、排除 seen）----
+        for _ in range(200):
+            t = int(np.random.randint(0, self.seq_len))
+            f = int(np.random.choice(allowed_arr))
+            if (t, f) not in seen:
+                return (t, f)
+        # 兜底：位置空间被占满时随机返回一个（交由调用方的 _repair_unique 合并重复幅值）
+        t = int(np.random.randint(0, self.seq_len))
+        f = int(np.random.choice(allowed_arr))
+        return (t, f)
+    
     def _init_individual(self, seq_len, num_features, allowed_features, ranges):
         """【变长编码】初始化一个个体，输出长度为 3n 的一维向量
         步骤:
           1) 先从 [n_min, n_max] 中均匀随机采样一个整数 n
           2) 再生成 n 个互不重复的 (t,f) 位置，每个位置按动态预算 epsilon*range[f] 采样幅值 p
+             【敏感度引导退火】use_sensitivity_init=True 时，位置采样改由 _sample_new_position 接管
+             （前期高比例从敏感度 top-K 候选池选，后期退火到弱引导）；否则保持原有随机采样。
           3) 拼接为 [t1,f1,p1, ..., tn,fn,pn]
         """
         n = int(np.random.randint(self.n_min, self.n_max + 1))   # 变长：逐个体随机采样扰动点数
@@ -573,13 +718,23 @@ class NVITA_NSGA2:
         max_attempts = n * 100
         attempts = 0
         while len(positions) < n and attempts < max_attempts:
-            t = np.random.randint(0, seq_len)
-            f = int(np.random.choice(allowed_features))
+            if self.use_sensitivity_init:
+                # 【敏感度引导退火】新位置由候选池引导 + 随机回退采样（排除已占用位置）
+                t_new, f_new = self._sample_new_position(positions, allowed_features)
+                t = int(t_new)
+                f = int(f_new)
+            else:
+                t = int(np.random.randint(0, seq_len))
+                f = int(np.random.choice(allowed_features))
             pos_key = (t, f)
             if pos_key not in positions:
                 positions.add(pos_key)
                 budget = self.epsilon * ranges[f]
-                p = np.random.uniform(-budget, budget) if budget > 0 else 0.0
+                if budget > 0:
+                    values = np.linspace(-budget, budget, P_DISCRETE_LEVELS)
+                    p = float(np.random.choice(values))
+                else:
+                    p = 0.0
                 ind.extend([float(t), float(f), p])
             attempts += 1
         # 位置空间不足时兜底补齐，保证输出长度恒为 3n
@@ -886,8 +1041,9 @@ class NVITA_NSGA2:
         for k in range(n_points):
             c[3*k]   = float(np.clip(round(c[3*k]),   0, seq_len - 1))
             c[3*k+1] = float(np.clip(round(c[3*k+1]), 0, num_features - 1))
-            bud = self.epsilon * ranges[int(c[3*k+1])]
-            c[3*k+2] = float(np.clip(c[3*k+2], -bud, bud))
+            f_idx = int(np.clip(round(c[3*k+1]), 0, num_features - 1))
+            bud = self.epsilon * ranges[f_idx]
+            c[3*k+2] = self._quantize_p(c[3*k+2], bud)
         return c
 
     def _repair_unique(self, c, seq_len, allowed_features):
@@ -975,53 +1131,118 @@ class NVITA_NSGA2:
             repaired.append(c)
         return repaired[0], repaired[1]
 
-    def _mutation(self, individual, seq_len, num_features, ranges, allowed_features):
-        """【变长编码】三类变异协同（三类变异概率相互独立）
-        1) 点级变异（概率最高，逐三元组独立触发，与固定长度版逻辑一致）：
-           分别以一定概率修改 t（70% 邻域 / 30% 全局）、f（allowed_features 均匀重采样）
-           或 p（归一化到 [0,1] 做标准多项式变异 PM，再线性映回 [-budget, budget]）
-        2) 插入变异（概率 self.insert_prob，默认 0.1）：随机新增一个不重复的 (t,f,p) 三元组，
-           n+1，且插入后不超过 n_max
-        3) 删除变异（概率 self.delete_prob，默认 0.2）：随机删除一个三元组，n-1；
+    def _mutation(self, individual, seq_len, num_features, ranges, allowed_features, gen=0):
+        """【变长编码】变异协同（幅值变异 + SA-MOO 位置替换 + 插入/删除，各概率相互独立）
+        1) 幅值变异（逐三元组独立触发，触发率 1/n，完全保留原离散档位逻辑）：
+           50% 随机重置到任意离散档，50% 邻域 ±1 移动
+        2) SA-MOO 位置替换变异（概率 0.25，替代原 t 邻域±1 + f 随机）：
+           每次替换 n_replace 个已有 (t,f) 位置，n_replace 随代数 gen 衰减（前期探索、后期精修）；
+           新位置由 CMO-IABA 自适应区域成功计数引导（60% 按 t/f 历史成功概率采样，40% 随机）
+        3) 插入变异（概率 self.insert_prob，默认 0.1）：新增一个不重复 (t,f,p) 三元组，n+1 且不超过 n_max；
+           新位置同样由 CMO-IABA 自适应引导
+        4) 删除变异（概率 self.delete_prob，默认 0.2）：随机删除一个三元组，n-1；
            【方案A】不再限制 n_min 下限，允许删到 0（产生不可行个体，交由 Deb 约束支配惩罚）
         变异后统一执行 _repair_unique + _enforce_length_bounds + _clip_tf_budget 合法性修复
+        gen: 当前进化代数（用于 SA-MOO 替换比例衰减），默认 0
         """
         mutant = np.asarray(individual, dtype=float).copy()
         n_points = self._num_points(mutant)
 
-        # ---------- 1) 点级变异 ----------
+        # ---------- 1) 幅值变异：逐三元组独立触发（t/f 位置变异已移至下方 SA-MOO 位置替换）----------
         for k in range(n_points):
             b = 3 * k
-            # 时间步 t：保留原触发率与「70% 邻域 / 30% 全局」策略
-            if np.random.random() < 0.15:
-                t_cur = int(round(mutant[b]))
-                t_new = t_cur + np.random.choice([-1, 1]) if np.random.random() < 0.7 \
-                    else np.random.randint(0, seq_len)
-                mutant[b] = float(np.clip(t_new, 0, seq_len - 1))
-            # 特征 f：从 allowed_features 均匀重采样（保留原逻辑）
-            if np.random.random() < 0.15 and len(allowed_features) > 0:
-                mutant[b+1] = float(np.random.choice(allowed_features))
-            # 扰动值 p：先把 p 归一化到 [0,1] 做标准 PM，再映回 [-budget, budget]
-            #            触发率沿用原逻辑 1/n（变长下 n 由当前个体长度反解）
+            # 扰动值 p：离散值变异（20 档位整数编码）
+            # 触发率沿用原逻辑 1/n；50% 随机重置到任意离散档，50% 邻域 ±1 移动
             if np.random.random() < 1.0 / max(n_points, 1):
                 f_idx = int(np.clip(round(mutant[b+1]), 0, num_features - 1))
                 bud = self.epsilon * ranges[f_idx]
-                x = float(np.clip((mutant[b+2] + bud) / (2 * bud + 1e-12), 0.0, 1.0))
-                u = np.random.random()
-                if u < 0.5:
-                    dq = (2 * u) ** (1.0 / (self.eta_m + 1.0)) - 1.0
+                if bud < 1e-12:
+                    mutant[b+2] = 0.0
                 else:
-                    dq = 1.0 - (2.0 * (1.0 - u)) ** (1.0 / (self.eta_m + 1.0))
-                mutant[b+2] = float(np.clip(x + dq, 0.0, 1.0)) * 2 * bud - bud
+                    values = np.linspace(-bud, bud, P_DISCRETE_LEVELS)
+                    cur_idx = int(np.clip(
+                        np.round((mutant[b+2] + bud) / (2 * bud) * (P_DISCRETE_LEVELS - 1)),
+                        0, P_DISCRETE_LEVELS - 1))
+                    if np.random.random() < 0.5:
+                        mutant[b+2] = float(np.random.choice(values))  # 随机重置
+                    else:
+                        delta = int(np.random.choice([-1, 1]))           # 邻域 ±1
+                        new_idx = int(np.clip(cur_idx + delta, 0, P_DISCRETE_LEVELS - 1))
+                        mutant[b+2] = float(values[new_idx])
 
-        # ---------- 2) 插入变异：n+1（不超过 n_max）----------
+        # ---------- 2) SA-MOO 位置替换变异 + CMO-IABA 自适应引导（替代原 t 邻域±1 + f 随机）----------
+        if np.random.random() < 0.25 and n_points >= 1:
+            # SA-MOO 动态替换比例：随代数 gen 衰减（前期大步探索，后期小步精修）
+            p_m_ratio = max(0.1, 1.0 - 0.9 * (gen / max(self.maxiter, 1)))
+            n_replace = max(1, int(n_points * 0.3 * p_m_ratio))
+            n_replace = min(n_replace, n_points)
+
+            existing_pos = set()
+            for k in range(n_points):
+                existing_pos.add((int(round(mutant[3*k])), int(round(mutant[3*k+1]))))
+
+            for _ in range(n_replace):
+                # SA-MOO：随机选一个要被替换的已有位置 A
+                replace_idx = int(np.random.randint(0, n_points))
+                t_old = int(round(mutant[3*replace_idx]))
+                f_old = int(round(mutant[3*replace_idx+1]))
+                if self.use_sensitivity_init:
+                    # 【敏感度引导退火】新位置 B 由 _sample_new_position 接管：
+                    # seen 排除现有占用位置，但 (t_old, f_old) 作为被替换位置允许重选
+                    seen = set(existing_pos)
+                    seen.discard((t_old, f_old))
+                    t_new, f_new = self._sample_new_position(seen, allowed_features)
+                    t_new, f_new = int(t_new), int(f_new)
+                else:
+                    # CMO-IABA：选新位置 B，累计成功>20 且计数非零时 60% 按成功概率引导，否则/其余 40% 随机
+                    if (self.total_success > 20 and self.t_success.sum() > 0
+                            and self.f_success.sum() > 0 and np.random.random() < 0.6):
+                        t_probs = self.t_success / self.t_success.sum()
+                        f_probs = self.f_success / self.f_success.sum()
+                        t_new = int(np.random.choice(seq_len, p=t_probs))
+                        f_new = int(np.random.choice(num_features, p=f_probs))
+                    else:
+                        t_new = int(np.random.randint(0, seq_len))
+                        f_new = int(np.random.choice(allowed_features)) if len(allowed_features) > 0 else f_old
+                # SA-MOO：A 移除、B 加入（仅当 B 不与现有位置重复）
+                if (t_new, f_new) not in existing_pos:
+                    mutant[3*replace_idx] = float(t_new)
+                    mutant[3*replace_idx+1] = float(f_new)
+                    # SA-MOO 扰动值迁移：50% 保留原值，50% 按新特征预算重采样离散档
+                    if np.random.random() < 0.5:
+                        bud = self.epsilon * ranges[f_new]
+                        values = np.linspace(-bud, bud, P_DISCRETE_LEVELS)
+                        mutant[3*replace_idx+2] = float(np.random.choice(values))
+                    existing_pos.discard((t_old, f_old))
+                    existing_pos.add((t_new, f_new))
+
+        # ---------- 3) 插入变异：n+1（不超过 n_max），新位置由敏感度引导退火或 CMO-IABA 自适应引导 ----------
         if np.random.random() < self.insert_prob and n_points < self.n_max:
-            existing = {(int(round(mutant[3*k])), int(round(mutant[3*k+1]))) for k in range(n_points)}
-            new_point = np.array(self._random_new_point(seq_len, allowed_features, ranges, existing)[0],
-                                 dtype=float)
-            mutant = np.concatenate([mutant, new_point])
-            n_points += 1
-        # ---------- 3) 删除变异：n-1（【方案A】不再限制 n_min 下限，允许删到 0）----------
+            existing_pos = set()
+            for k in range(n_points):
+                existing_pos.add((int(round(mutant[3*k])), int(round(mutant[3*k+1]))))
+            if self.use_sensitivity_init:
+                # 【敏感度引导退火】新位置由 _sample_new_position 接管（seen 排除现有占用位置）
+                t_new, f_new = self._sample_new_position(existing_pos, allowed_features)
+                t_new, f_new = int(t_new), int(f_new)
+            else:
+                # CMO-IABA：60% 按成功概率引导，40% 随机
+                if (self.total_success > 20 and self.t_success.sum() > 0
+                        and self.f_success.sum() > 0 and np.random.random() < 0.6):
+                    t_probs = self.t_success / self.t_success.sum()
+                    f_probs = self.f_success / self.f_success.sum()
+                    t_new = int(np.random.choice(seq_len, p=t_probs))
+                    f_new = int(np.random.choice(num_features, p=f_probs))
+                else:
+                    t_new = int(np.random.randint(0, seq_len))
+                    f_new = int(np.random.choice(allowed_features))
+            if (t_new, f_new) not in existing_pos:
+                bud = self.epsilon * ranges[f_new]
+                values = np.linspace(-bud, bud, P_DISCRETE_LEVELS)
+                p_new = float(np.random.choice(values))
+                mutant = np.concatenate([mutant, [float(t_new), float(f_new), p_new]])
+                n_points += 1
+        # ---------- 4) 删除变异：n-1（【方案A】不再限制 n_min 下限，允许删到 0）----------
         elif np.random.random() < self.delete_prob and n_points > 0:
             drop = int(np.random.randint(0, n_points))
             kept = [mutant[3*k:3*k+3] for k in range(n_points) if k != drop]
@@ -1058,6 +1279,13 @@ class NVITA_NSGA2:
         seq_len = x_np.shape[1]
         num_features = x_np.shape[2]
 
+        # 【敏感度引导退火】为当前样本注入上下文，供 _compute_sensitivity / _sample_new_position 使用
+        self.seq_len = int(seq_len)
+        self.num_features = int(num_features)
+        self.device = device
+        self.current_gen = 0
+        self.candidate_pool = []
+
         # 【查询计数 / 过程诊断】每样本开头重置累计查询数、首次成功查询数与诊断计数器
         self.query_count = 0
         self.first_success_query = -1
@@ -1080,12 +1308,28 @@ class NVITA_NSGA2:
             self._clean_pred_cache = self.model(torch.FloatTensor(x_np).to(device)).item()
         self.query_count += 1
 
+        # ========== 【敏感度引导退火】攻击前探测：seq_len*num_features 次前向查询 → top-K 候选池 ==========
+        # 仅在 use_sensitivity_init=True 时启用；额外查询成本 = seq_len*num_features（默认 20×4=80），
+        # 相对进化阶段 pop_size*maxiter*~1.5 次查询仅增加 ~1.3%。
+        # 预算口径与 NSGA-II 一致（ranges = self._get_window_range(x_np)，use_window_range=False 时为全局 range_f）。
+        if self.use_sensitivity_init:
+            sensitivity = self._compute_sensitivity(
+                x_np[0], self._clean_pred_cache, ranges, allowed_features)
+            self.candidate_pool = self._build_candidate_pool(
+                sensitivity, self.candidate_pool_size)
+            self.current_gen = 0
+
         # 【first_success_query 跟踪】封装评估：调用 _evaluate_objectives 后检查是否首次达到 RSE>=knee_min_rse
         def _eval_and_track(ind):
             obj, n_act = self._evaluate_objectives(x_np, y_val, ind, device)
             if self.first_success_query < 0 and (-obj[1]) >= self.knee_min_rse:
                 self.first_success_query = self.query_count
             return obj, n_act
+
+        # ========== CMO-IABA：每样本独立的自适应区域成功计数（评估初始种群前初始化）==========
+        self.t_success = np.zeros(seq_len)        # 每个时间步的成功变异累计次数
+        self.f_success = np.zeros(num_features)   # 每个特征的成功变异累计次数
+        self.total_success = 0                     # 总成功次数（>20 后才启用概率引导）
 
         # ========== 1. 种群初始化（【变长编码】每个个体的 n 独立随机采样，种群用 list 承载）==========
         population = [
@@ -1104,6 +1348,7 @@ class NVITA_NSGA2:
 
         # ========== 4. NSGA-II 主循环 ==========
         for gen in range(self.maxiter):
+            self.current_gen = gen   # 【敏感度引导退火】供 _sample_new_position 计算当前引导比例
             # 非支配排序（Deb 约束支配：可行优先 → 二维目标支配 → 违约度比较）
             cv_pop = self._constraint_violation(n_actual_pop)
             fronts, rank = self._fast_non_dominated_sort(objectives, cv_pop)
@@ -1122,23 +1367,55 @@ class NVITA_NSGA2:
             )
 
             # 生成子代：变长单点交叉 + 点级变异（末尾均含合法性修正、位置去重与长度修复）
+            # 父代目标缓存：mating_pool 个体是 population 的精确副本，用其编码字节命中已算好的
+            # objectives，零额外查询即可取到父代 -RSE（供 CMO-IABA 成功计数比较子代 vs 父代）
+            parent_obj_cache = {np.asarray(ind, dtype=float).tobytes(): obj
+                                for ind, obj in zip(population, objectives)}
+
             offspring = []
+            parent_pairs = []   # 与 offspring 同序，记录每个子代对应的父代（c1←p1, c2←p2）
             for i in range(0, self.pop_size, 2):
                 j = min(i + 1, self.pop_size - 1)
                 p1 = mating_pool[i]
                 p2 = mating_pool[j]
                 c1, c2 = self._crossover(p1, p2, seq_len, num_features, ranges, allowed_features)
-                c1 = self._mutation(c1, seq_len, num_features, ranges, allowed_features)
-                c2 = self._mutation(c2, seq_len, num_features, ranges, allowed_features)
+                c1 = self._mutation(c1, seq_len, num_features, ranges, allowed_features, gen)
+                c2 = self._mutation(c2, seq_len, num_features, ranges, allowed_features, gen)
                 offspring.append(c1)
                 offspring.append(c2)
+                parent_pairs.append(p1)
+                parent_pairs.append(p2)
             offspring = offspring[:self.pop_size]   # 【变长编码】保持 list 容器，不堆叠成矩形矩阵
+            parent_pairs = parent_pairs[:len(offspring)]
 
             # 评估子代双目标 + 约束变量
             offspring_obj = np.zeros((len(offspring), 2))
             n_actual_off = np.zeros(len(offspring))
             for i in range(len(offspring)):
                 offspring_obj[i], n_actual_off[i] = _eval_and_track(offspring[i])
+
+            # ========== CMO-IABA：自适应区域成功计数更新 ==========
+            # 子代 -RSE 比其父代更小（即 RSE 更大、攻击更强）时，把子代相对父代新增的 (t,f)
+            # 位置所在的时间步/特征区域计数 +1，供后续代的位置替换/插入按成功概率引导采样。
+            for i in range(len(offspring)):
+                parent = parent_pairs[i]
+                p_key = np.asarray(parent, dtype=float).tobytes()
+                if p_key in parent_obj_cache:
+                    parent_obj = parent_obj_cache[p_key]
+                else:
+                    parent_obj, _ = _eval_and_track(parent)   # 兜底（正常不触发）
+                    parent_obj_cache[p_key] = parent_obj
+                if offspring_obj[i][1] < parent_obj[1]:
+                    parent_pos = {(int(round(parent[3*k])), int(round(parent[3*k+1])))
+                                  for k in range(len(parent) // 3)}
+                    child = offspring[i]
+                    child_pos = {(int(round(child[3*k])), int(round(child[3*k+1])))
+                                 for k in range(len(child) // 3)}
+                    for (nt, nf) in (child_pos - parent_pos):
+                        if 0 <= nt < seq_len and 0 <= nf < num_features:
+                            self.t_success[nt] += 1
+                            self.f_success[nf] += 1
+                    self.total_success += 1
 
             # μ+λ 环境选择：合并父代和子代（变长个体无法 vstack，改用 list 拼接）
             combined_pop = population + offspring
@@ -1252,7 +1529,7 @@ def extract_first_front(objs):
 def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxiter, pop_size, device,
                                 feature_ranges, feature_constraint=None, perturb_features=None,
                                 print_info=False, select_mode='knee', knee_min_rse=2.0,
-                                insert_prob=0.1, delete_prob=0.1):
+                                insert_prob=0.1, delete_prob=0.1, use_window_range=False):
     """
     批量运行 NSGA-II 双目标变长攻击（L0 作为约束）
 
@@ -1294,6 +1571,12 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
         knee_min_rse=knee_min_rse,
         insert_prob=insert_prob,
         delete_prob=delete_prob,
+        use_window_range=use_window_range,
+        # ===== 【敏感度引导退火】从 NSGA2_CONFIG 读取 4 个新参数并传入构造函数 =====
+        use_sensitivity_init=NSGA2_CONFIG.get('use_sensitivity_init', True),
+        candidate_pool_size=NSGA2_CONFIG.get('candidate_pool_size', 20),
+        guided_ratio_start=NSGA2_CONFIG.get('guided_ratio_start', 0.6),
+        guided_ratio_end=NSGA2_CONFIG.get('guided_ratio_end', 0.3),
     )
 
     total = X_test.shape[0]
@@ -1405,317 +1688,17 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
     return X_adv_total, metrics, all_generation_pareto
 
 
-def plot_pareto_evolution(generation_pareto, n_min, n_max, pop_size, save_path=None,
-                          selected_obj=None):
-    """
-    绘制双目标 Pareto 前沿进化二维散点图（L0 作为约束，n in [n_min, n_max]）
-    横轴：扰动 L2 范数（目标1，越小越隐蔽）
-    纵轴：-RSE（目标2，越小代表攻击效果越强）
-    代数：点颜色与透明度均随代数递增（越晚越亮越实），最后一代加黑色描边突出
-    记录格式：generation_pareto 每条 shape=(m,3) = [L2, -RSE, n_actual(附带属性)]
-    【双目标改造】删除以 n_actual 着色的颜色条：n_actual 是约束变量而非目标维，第三维从
-    「坐标轴（三目标版）→ 颜色条（双目标初版）」的遗留编码已彻底移出图形通道，
-    其统计量仍由 metrics / analysis_data.pkl 持久化
-    selected_obj: 可选，(L2, -RSE) 元组或 shape=(2,) 数组，非空时在末代前沿上叠加星形标记
-    """
-    n_generations = len(generation_pareto)
-    if n_generations == 0:
-        print("警告: 无 Pareto 进化数据可绘图")
-        return
-
-    fig, ax = plt.subplots(figsize=(11, 8))
-
-    # 收集所有代的点（颜色与透明度均映射代数）
-    all_l2, all_nrse, all_gen, all_alpha, last_gen_mask = [], [], [], [], []
-    for gen_idx, front_data in enumerate(generation_pareto):
-        if front_data.shape[0] == 0:
-            continue
-        is_last = (gen_idx == n_generations - 1)
-        alpha = 0.35 + 0.65 * (gen_idx / max(n_generations - 1, 1))   # 代数越晚越实
-        all_l2.append(front_data[:, 0])       # 目标1: L2 范数
-        all_nrse.append(front_data[:, 1])     # 目标2: -RSE（已是取负号后的最小化形式）
-        all_gen.append(np.full(front_data.shape[0], gen_idx))
-        all_alpha.append(np.full(front_data.shape[0], alpha))
-        last_gen_mask.append(np.full(front_data.shape[0], is_last))
-    if not all_l2:
-        print("警告: Pareto 进化数据全部为空，跳过绘图")
-        plt.close(fig)
-        return
-    xs = np.concatenate(all_l2)
-    ys = np.concatenate(all_nrse)
-    gen_ids = np.concatenate(all_gen)
-    alphas = np.concatenate(all_alpha)
-    lasts = np.concatenate(last_gen_mask)
-
-    # 颜色统一映射代数（viridis），逐点 alpha 写入 RGBA 第 4 通道（matplotlib 的
-    # scatter alpha 参数只接受标量，透明度随代数递增须通过 RGBA 实现）
-    norm = plt.Normalize(vmin=0, vmax=max(n_generations - 1, 1))
-    rgba = plt.cm.viridis(norm(gen_ids))
-    rgba[:, 3] = alphas
-
-    ax.scatter(xs[~lasts], ys[~lasts], c=rgba[~lasts], s=45, edgecolors='none')
-    ax.scatter(xs[lasts], ys[lasts], c=rgba[lasts], s=60,
-               edgecolors='k', linewidths=0.6,
-               label=f'Final gen ({n_generations - 1})')
-
-    # 可选：叠加 knee / max_rse 选中解的星形标记
-    if selected_obj is not None:
-        sel = np.asarray(selected_obj, dtype=float).ravel()
-        if sel.shape[0] >= 2:
-            ax.scatter(sel[0], sel[1], marker='*', s=220, c='gold',
-                       edgecolors='k', linewidths=0.8, zorder=5,
-                       label=f'Selected ({sel[0]:.4f}, {sel[1]:.4f})')
-
-    sm = plt.cm.ScalarMappable(cmap='viridis', norm=norm)
-    sm.set_array([])
-    cb = fig.colorbar(sm, ax=ax)
-    cb.set_label('Generation index', fontsize=12)
-    # 代数索引为整数，避免颜色条刻度显示成 2.0 / 4.0 之类的小数
-    cb.set_ticks(np.unique(np.linspace(0, n_generations - 1, min(n_generations, 6)).round()))
-    cb.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{int(round(v))}'))
-
-    ax.set_xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
-    ax.set_ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
-    ax.set_title(f'Bi-objective Pareto Front Evolution (L0 as constraint, n in [{n_min},{n_max}], '
-                 f'pop_size={pop_size})', fontsize=13, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.legend(title='Generation', loc='upper right', fontsize=9)
-    ax.text(0.02, -0.13, '颜色与透明度均随代数递增（越晚越亮越实），最后一代加黑色描边；'
-            'n_actual 为约束变量，统计量见控制台输出与 analysis_data.pkl',
-            transform=ax.transAxes, fontsize=9, color='dimgray')
-
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  Pareto 进化图已保存至: {save_path}")
-    plt.show()
-
-
-def plot_pareto_evolution_key_generations(all_generation_pareto, save_path=None, n_key_gens=5):
-    """【双目标】绘制关键代数 Pareto 前沿对比图（跨样本聚合 + 逐代二维非支配筛选 + 连接线）
-
-    双目标 (L2, -RSE) 下前沿本身就是平面曲线，因此把每一代前沿画成一条带连接线的曲线，
-    取首代 / 中间若干代 / 末代共 n_key_gens 条曲线叠在同一张图上，展示前沿随代数向左下
-    （L2 更小且 -RSE 更小 = 更隐蔽且更强攻击）收敛的过程。
-
-    统计口径与全局最终前沿一致：同一代先把所有样本的前沿点合并（vstack），再做一次
-    二维非支配筛选（extract_first_front，n_actual 为附带属性不参与支配），
-    避免逐样本各画一条曲线导致图形爆炸。
-    all_generation_pareto: run_nsga2_standalone_attack 返回的记录列表，每条含
-                           'generation_pareto'（每代 shape=(m,3) = [L2, -RSE, n_actual]）
-    返回实际保存的图片路径列表。
-    """
-    valid_recs = [rec for rec in all_generation_pareto
-                  if len(rec.get('generation_pareto', [])) > 0]
-    if not valid_recs:
-        print("警告: 无 Pareto 进化数据可绘制关键代数对比图")
-        return []
-    n_gen = max(len(rec['generation_pareto']) for rec in valid_recs)
-    if n_gen < 2:
-        print(f"警告: 进化代数仅为 {n_gen}，关键代数对比图无意义，跳过绘制")
-        return []
-
-    # 关键代数索引（0-based）：首代 + 末代 + 中间等距采样，去重后按代数升序
-    n_key = int(min(max(n_key_gens, 2), n_gen))
-    key_gens = sorted(set(np.linspace(0, n_gen - 1, n_key).round().astype(int).tolist()))
-
-    cmap = plt.get_cmap('viridis')
-    markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'X']
-    plt.figure(figsize=(11, 8))
-    plotted_gens = []
-    for k, g in enumerate(key_gens):
-        gen_pts = [rec['generation_pareto'][g] for rec in valid_recs
-                   if g < len(rec['generation_pareto'])
-                   and rec['generation_pareto'][g].shape[0] > 0]
-        if not gen_pts:
-            continue
-        front = extract_first_front(np.vstack(gen_pts))[:, :2]   # 只取双目标列作图
-        if front.shape[0] == 0:
-            continue
-        front = front[np.argsort(front[:, 0], kind='stable')]    # 按 L2 升序连线
-        color = cmap(k / max(len(key_gens) - 1, 1))
-        plt.plot(front[:, 0], front[:, 1], '-', color=color, linewidth=2.0, alpha=0.85,
-                 label=f'Gen {g + 1}/{n_gen} (front size={front.shape[0]})')
-        plt.scatter(front[:, 0], front[:, 1], c=[color], marker=markers[k % len(markers)],
-                    s=70, edgecolors='k', linewidths=0.5, zorder=3)
-        plotted_gens.append(int(g))
-
-    if not plotted_gens:
-        print("警告: 关键代数前沿数据全部为空，跳过绘制")
-        plt.close()
-        return []
-
-    plt.xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
-    plt.ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
-    plt.title('Pareto Front Evolution at Key Generations\n'
-              '(cross-sample aggregated fronts, bi-objective with L0 as constraint)',
-              fontsize=13, fontweight='bold')
-    plt.legend(fontsize=10, loc='upper right', title='Generation')
-    plt.grid(True, alpha=0.3)
-    plt.text(0.02, -0.13, '注：每代先将各样本前沿点合并再做二维非支配筛选；曲线越靠左下方越优；'
-             f'实际绘制代数（1-based）= {[g + 1 for g in plotted_gens]}',
-             transform=plt.gca().transAxes, fontsize=9, color='dimgray')
-    plt.tight_layout()
-
-    saved = []
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  关键代数 Pareto 前沿对比图已保存至: {save_path}")
-        saved.append(save_path)
-    plt.show()
-    return saved
-
-
-def plot_multi_sample_pf_evolution(all_records, n_label, pop_size, maxiter, out_dir,
-                                   select_mode='knee', knee_min_rse=2.0,
-                                   n_min=1, n_max=10,
-                                   num_samples=10, seed=42):
-    """随机抽取 num_samples 个评估时间窗口，绘制各自 Pareto 前沿进化图（2×5 总览 + 单样本高清）
-
-    不重跑攻击，直接使用缓存的 all_records（run_nsga2_standalone_attack 返回的 all_generation_pareto）。
-    all_records: list[dict]，每条含 'sample_idx' / 'generation_pareto' / 'final_pareto_obj'。
-    返回：(overview_path, sample_paths, sampled_indices)
-        overview_path:  2×5 总览图路径（str 或 None）
-        sample_paths:   单样本图路径列表 list[str]
-        sampled_indices: 抽中的 sample_idx 列表
-    """
-    # ---- 1. 可复现随机抽样 ----
-    rng = np.random.default_rng(seed)
-    n_total = len(all_records)
-    if n_total == 0:
-        print("警告: all_records 为空，跳过多样本 Pareto 进化绘图")
-        return None, [], []
-    n_pick = min(num_samples, n_total)
-    picked = rng.choice(n_total, size=n_pick, replace=False)
-    sampled_indices = [int(all_records[i]['sample_idx']) for i in picked]
-    print(f"[plot_multi_sample_pf] 抽中 {n_pick} 个样本 (seed={seed}): {sampled_indices}")
-
-    # ---- 2. 统一代数→颜色映射（取所有抽中样本的最大代数）----
-    max_gen = 0
-    for idx in picked:
-        rec = all_records[idx]
-        ng = len(rec.get('generation_pareto', []))
-        if ng > max_gen:
-            max_gen = ng
-    max_gen = max(max_gen, 1)
-    norm_global = plt.Normalize(vmin=0, vmax=max_gen - 1)
-
-    os.makedirs(out_dir, exist_ok=True)
-    samples_dir = os.path.join(out_dir, 'pf_evolution_samples')
-    os.makedirs(samples_dir, exist_ok=True)
-
-    # ---- 3. 2×5 总览图 ----
-    n_rows, n_cols = 2, 5
-    n_slots = n_rows * n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 10))
-    axes_flat = axes.flatten()
-
-    for slot in range(n_slots):
-        ax = axes_flat[slot]
-        if slot >= n_pick:
-            ax.set_visible(False)
-            continue
-        rec = all_records[picked[slot]]
-        gen_pareto = rec.get('generation_pareto', [])
-        n_gens = len(gen_pareto)
-        sidx = rec.get('sample_idx', picked[slot])
-
-        # 收集所有代的点
-        all_l2, all_nrse, all_gen_id = [], [], []
-        for gi, fd in enumerate(gen_pareto):
-            if fd.shape[0] == 0:
-                continue
-            all_l2.append(fd[:, 0])
-            all_nrse.append(fd[:, 1])
-            all_gen_id.append(np.full(fd.shape[0], gi))
-
-        if not all_l2:
-            ax.text(0.5, 0.5, f'Sample #{sidx}\n(no data)', ha='center', va='center',
-                    transform=ax.transAxes, fontsize=9)
-            continue
-
-        xs = np.concatenate(all_l2)
-        ys = np.concatenate(all_nrse)
-        gids = np.concatenate(all_gen_id)
-        rgba = plt.cm.viridis(norm_global(gids))
-        # 透明度随代数递增
-        for gi_idx in range(len(gids)):
-            rgba[gi_idx, 3] = 0.35 + 0.65 * (gids[gi_idx] / max(max_gen - 1, 1))
-
-        ax.scatter(xs, ys, c=rgba, s=18, edgecolors='none')
-        ax.set_title(f'Sample #{sidx}', fontsize=10, fontweight='bold')
-        ax.set_xlabel('L2 Norm', fontsize=8)
-        ax.set_ylabel('-RSE', fontsize=8)
-        ax.tick_params(labelsize=7)
-        ax.grid(True, alpha=0.2)
-
-        # knee 选中解标记
-        final_obj = rec.get('final_pareto_obj')
-        if isinstance(final_obj, np.ndarray) and final_obj.shape[0] > 0:
-            knee_pos = NVITA_NSGA2._select_knee(final_obj, select_mode, knee_min_rse, n_min, n_max)
-            sel_pt = final_obj[knee_pos, :2]
-            ax.scatter(sel_pt[0], sel_pt[1], marker='*', s=120, c='gold',
-                       edgecolors='k', linewidths=0.5, zorder=5)
-            ax.annotate(f'({sel_pt[0]:.3f},{sel_pt[1]:.3f})',
-                        xy=(sel_pt[0], sel_pt[1]), fontsize=6,
-                        xytext=(4, 4), textcoords='offset points', color='darkred')
-
-    # 共享 colorbar
-    sm = plt.cm.ScalarMappable(cmap='viridis', norm=norm_global)
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=axes_flat[:n_pick].tolist(), location='right',
-                        shrink=0.8, pad=0.02)
-    cbar.set_label('Generation', fontsize=11)
-    cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{int(round(v))}'))
-
-    fig.suptitle(f'Pareto Front Evolution of {n_pick} Randomly Sampled Time Windows '
-                 f'(bi-objective, L0 as constraint, {n_label}, '
-                 f'pop_size={pop_size}, maxiter={maxiter})',
-                 fontsize=14, fontweight='bold')
-    fig.tight_layout(rect=[0, 0, 0.92, 0.95])
-
-    overview_path = os.path.join(out_dir, 'pareto_multi_sample_overview.png')
-    fig.savefig(overview_path, dpi=300, bbox_inches='tight')
-    print(f"  多样本 Pareto 总览图已保存至: {overview_path}")
-    plt.show()
-
-    # ---- 4. 每个抽中样本的独立高清图 ----
-    sample_paths = []
-    for slot in range(n_pick):
-        rec = all_records[picked[slot]]
-        gen_pareto = rec.get('generation_pareto', [])
-        sidx = rec.get('sample_idx', picked[slot])
-
-        # 计算 knee 选中解
-        final_obj = rec.get('final_pareto_obj')
-        sel_obj = None
-        if isinstance(final_obj, np.ndarray) and final_obj.shape[0] > 0:
-            knee_pos = NVITA_NSGA2._select_knee(final_obj, select_mode, knee_min_rse, n_min, n_max)
-            sel_obj = final_obj[knee_pos, :2]
-
-        sp = os.path.join(samples_dir, f'sample_{sidx}.png')
-        plot_pareto_evolution(gen_pareto, n_min=n_min, n_max=n_max, pop_size=pop_size,
-                              save_path=sp, selected_obj=sel_obj)
-        sample_paths.append(sp)
-
-    print(f"  单样本 Pareto 进化图已保存至: {samples_dir}/")
-    for p in sample_paths:
-        print(f"    {p}")
-
-    return overview_path, sample_paths, sampled_indices
-
-
 def plot_sample_pf_evolution_key_gens(all_records, out_dir, n_key_gens=5,
                                       num_samples=10, seed=42):
-    """逐样本特定代数带连线 Pareto 前沿进化图（2×5 总览 + 单样本高清）
+    """随机抽取 num_samples 个样本的关键代数带连线 Pareto 前沿进化图，合并为一张多子图总览图
 
-    与 plot_pareto_evolution_key_generations 的区别：
-    - 后者把所有样本的前沿点跨样本聚合后画在一张图上；
-    - 本函数为每个抽中样本各画一张，子图内按关键代数（首代/中间代/末代）分别
-      做二维非支配筛选后画带连线曲线，展示该样本 PF 随代数的收敛趋势。
+    与跨样本聚合图的区别：本函数为每个抽中样本各画一个子图（而非各自单独存一张 PNG），
+    子图内按关键代数（首代/中间代/末代）分别做二维非支配筛选后画带连线曲线，
+    展示该样本 PF 随代数的收敛趋势；所有子图拼进同一张 figure（默认 2×5 网格）后仅保存一张 PNG。
+    【可视化精简】本项目仅保留两张攻击可视化图：本函数（单张多子图 PF 进化总览图）
+    与 plot_perturb_position_heatmap（扰动位置频次热力图）。
 
-    返回：(overview_path, sample_paths, sampled_indices)
+    返回：(overview_path, [], sampled_indices)
     """
     rng = np.random.default_rng(seed)
     n_total = len(all_records)
@@ -1728,8 +1711,6 @@ def plot_sample_pf_evolution_key_gens(all_records, out_dir, n_key_gens=5,
     print(f"[plot_sample_pf_key_gens] 抽中 {n_pick} 个样本 (seed={seed}): {sampled_indices}")
 
     os.makedirs(out_dir, exist_ok=True)
-    samples_dir = os.path.join(out_dir, 'pf_key_gens_samples')
-    os.makedirs(samples_dir, exist_ok=True)
 
     cmap = plt.get_cmap('viridis')
     markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'X']
@@ -1753,11 +1734,11 @@ def plot_sample_pf_evolution_key_gens(all_records, out_dir, n_key_gens=5,
                 continue
             front = front[np.argsort(front[:, 0], kind='stable')]
             color = cmap(k / max(len(key_gens) - 1, 1))
-            ax.plot(front[:, 0], front[:, 1], '-', color=color, linewidth=1.8, alpha=0.85,
+            ax.plot(front[:, 0], front[:, 1], '-', color=color, linewidth=1.5, alpha=0.85,
                     label=f'Gen {g + 1}/{n_gen} ({front.shape[0]})')
             ax.scatter(front[:, 0], front[:, 1], c=[color],
-                       marker=markers[k % len(markers)], s=40,
-                       edgecolors='k', linewidths=0.4, zorder=3)
+                       marker=markers[k % len(markers)], s=22,
+                       edgecolors='k', linewidths=0.3, zorder=3)
             plotted.append(int(g))
         ax.set_title(f'Sample #{sidx}', fontsize=10, fontweight='bold')
         ax.set_xlabel('L2 Norm', fontsize=8)
@@ -1767,76 +1748,50 @@ def plot_sample_pf_evolution_key_gens(all_records, out_dir, n_key_gens=5,
         ax.legend(fontsize=6, loc='upper right', title='Gen', framealpha=0.7)
         return plotted
 
-    # ---- 1. 2×5 总览图 ----
-    n_rows, n_cols = 2, 5
-    n_slots = n_rows * n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 10))
-    axes_flat = axes.flatten()
+    # ---- 所有抽中样本拼进同一张 figure（默认 2×5 网格），仅保存一张 PNG ----
+    n_cols = 5
+    n_rows = int(np.ceil(n_pick / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.2 * n_cols, 3.6 * n_rows))
+    axes_flat = np.atleast_1d(axes).flatten()
 
-    for slot in range(n_slots):
-        ax = axes_flat[slot]
-        if slot >= n_pick:
-            ax.set_visible(False)
-            continue
-        rec = all_records[picked[slot]]
-        gen_pareto = rec.get('generation_pareto', [])
-        sidx = rec.get('sample_idx', picked[slot])
-        _draw_one_sample(ax, gen_pareto, sidx, len(gen_pareto))
-
-    fig.suptitle('Pareto Front Evolution at Key Generations (per-sample, '
-                 'bi-objective, L0 as constraint)\n'
-                 'Each subplot: one sampled time window, curves = non-dominated fronts '
-                 'at evenly-spaced generations',
-                 fontsize=13, fontweight='bold')
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
-
-    overview_path = os.path.join(out_dir, 'pareto_sample_key_gens_overview.png')
-    fig.savefig(overview_path, dpi=300, bbox_inches='tight')
-    print(f"  逐样本关键代数 PF 进化总览图已保存至: {overview_path}")
-    plt.show()
-
-    # ---- 2. 每个抽中样本的独立高清图 ----
-    sample_paths = []
+    n_drawn = 0
     for slot in range(n_pick):
+        ax = axes_flat[slot]
         rec = all_records[picked[slot]]
         gen_pareto = rec.get('generation_pareto', [])
         sidx = rec.get('sample_idx', picked[slot])
+        plotted = _draw_one_sample(ax, gen_pareto, sidx, len(gen_pareto))
+        if plotted:
+            n_drawn += 1
+    # 隐藏多余子图（抽中样本数不足 n_rows×n_cols 时）
+    for slot in range(n_pick, len(axes_flat)):
+        axes_flat[slot].set_visible(False)
 
-        fig_s, ax_s = plt.subplots(figsize=(11, 8))
-        plotted = _draw_one_sample(ax_s, gen_pareto, sidx, len(gen_pareto))
-        if not plotted:
-            plt.close(fig_s)
-            continue
-        ax_s.set_xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
-        ax_s.set_ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
-        ax_s.set_title(f'Pareto Front Evolution at Key Generations — Sample #{sidx}\n'
-                       f'(bi-objective, L0 as constraint)', fontsize=13, fontweight='bold')
-        ax_s.legend(fontsize=10, loc='upper right', title='Generation')
-        ax_s.text(0.02, -0.12, f'实际绘制代数（1-based）= {[g + 1 for g in plotted]}；'
-                  '曲线越靠左下方越优',
-                  transform=ax_s.transAxes, fontsize=9, color='dimgray')
-        fig_s.tight_layout()
+    if n_drawn == 0:
+        print("警告: 抽中样本均无有效 PF 进化数据，跳过总览图绘制")
+        plt.close(fig)
+        return None, [], sampled_indices
 
-        sp = os.path.join(samples_dir, f'sample_{sidx}_key_gens.png')
-        fig_s.savefig(sp, dpi=300, bbox_inches='tight')
-        sample_paths.append(sp)
-        plt.close(fig_s)
+    fig.suptitle(f'Pareto Front Evolution at Key Generations — {n_pick} Randomly Sampled Windows\n'
+                 f'(bi-objective, L0 as constraint; 曲线越靠左下方越优)',
+                 fontsize=15, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
 
-    print(f"  逐样本关键代数 PF 进化图已保存至: {samples_dir}/")
-    for p in sample_paths:
-        print(f"    {p}")
+    overview_path = os.path.join(out_dir, 'pf_key_gens_overview.png')
+    fig.savefig(overview_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  多样本关键代数 PF 进化总览图（单张）已保存至: {overview_path}")
 
-    return overview_path, sample_paths, sampled_indices
+    return overview_path, [], sampled_indices
 
 
 # =============================================================================
 # SECTION 5.5: 攻击收敛性与前沿结构高级分析
-# 包含：二维超体积(HV)逐代收敛曲线 / 双目标均值与最优值进化曲线（n_actual 作为约束变量统计）/
-#       全局最终前沿主 Pareto 图（L2 vs -RSE 双目标曲线）/
-#       RSE中位典型样本攻击效果对比 / 扰动位置频次热力图
-# 【双目标改造】已删除三目标版遗留的每代前沿解数量曲线（front0 在三目标下迅速吞没种群，
-# 需监控前沿规模；双目标+L0约束后该诊断不再必要）与 n_actual 颜色条编码；
-# 前沿随代数的演化形状改由 SECTION 5 的 plot_pareto_evolution_key_generations 呈现
+# 保留：二维超体积(HV) / 双目标均值与最优值 / 每代 n_actual 等收敛统计（compute_generation_metrics，
+#       仅控制台打印 + analysis_data.pkl 持久化，不再绘图）；
+#       全局 Pareto 前沿扰动位置 (t,f) 频次热力图（plot_perturb_position_heatmap，本项目保留的两张图之一）
+# 【可视化精简】已删除 HV 收敛曲线 / 双目标进化曲线 / 全局前沿主 Pareto 图 / RSE 中位典型样本对比图
+# 等绘图函数；前沿随代数的演化形状改由 SECTION 5 的 plot_sample_pf_evolution_key_gens 呈现
 # 全部基于攻击结果数据做后处理（不改动攻击核心逻辑），统计数据持久化到 analysis_data.pkl
 # =============================================================================
 
@@ -1961,95 +1916,6 @@ def compute_generation_metrics(all_generation_pareto):
     return generation_metrics
 
 
-def plot_hv_convergence(generation_metrics, save_path=None):
-    """绘制超体积收敛曲线（横轴 = 进化代数，纵轴 = 跨样本平均 HV）"""
-    hv_mean = np.asarray(generation_metrics['hv_mean'])
-    gens = np.arange(len(hv_mean))
-    plt.figure(figsize=(10, 6))
-    plt.plot(gens, hv_mean, '-o', color='tab:blue', linewidth=2.5, markersize=5,
-             alpha=0.9, label='Mean Hypervolume')
-    plt.xlabel('Generation', fontsize=13)
-    plt.ylabel('Hypervolume Value', fontsize=13)
-    plt.title('Convergence of Hypervolume (Bi-objective: L2 vs -RSE)', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=11, loc='best')
-    plt.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  HV 收敛曲线已保存至: {save_path}")
-    plt.show()
-
-
-def plot_objective_evolution(generation_metrics, save_path=None):
-    """绘制双目标逐代均值/最优值曲线（上下排列 2 张子图，每图含 Mean 与 Best 两条曲线）
-    n_actual 不再是目标维（已改为约束变量），其每代均值以 n_actual_mean 键
-    保留在 generation_metrics 中供控制台打印/持久化，不再绘制目标子图。
-    """
-    gens = np.arange(len(generation_metrics['obj1_mean']))
-    fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
-    specs = [
-        ('obj1_mean', 'obj1_best', 'tab:blue', 'Perturbation L2 Norm (obj1)\nsmaller = more imperceptible'),
-        ('obj2_mean', 'obj2_best', 'tab:orange', '-RSE (obj2)\nsmaller = stronger attack'),
-    ]
-    for ax, (mean_key, best_key, color, ylabel) in zip(axes, specs):
-        ax.plot(gens, generation_metrics[mean_key], '-', color=color, linewidth=2.2,
-                label='Mean')
-        ax.plot(gens, generation_metrics[best_key], '--', color=color, linewidth=2.0,
-                alpha=0.85, label='Best (min)')
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=10, loc='best')
-    axes[-1].set_xlabel('Generation', fontsize=13)
-    fig.suptitle('Evolution of Two Objectives (L0 as constraint)', fontsize=15, fontweight='bold')
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  双目标进化曲线已保存至: {save_path}")
-    plt.show()
-
-
-def plot_global_pareto_front(global_front, save_dir):
-    """绘制最终全局 Pareto 前沿主图（L2 vs -RSE 双目标曲线）
-
-    【双目标改造】① 原 plot_pareto_2d_projections 的三张两两组合投影合并为一张主 Pareto 图，
-    函数随之更名：双目标下前沿本身就是二维平面曲线，n-RSE / n-L2 不再是 Pareto 投影；
-    ② 删除按 n_actual 着色的颜色条——n_actual 已是约束变量而非目标维，不再占据图形编码通道，
-    其均值等统计量仍由 metrics / analysis_data.pkl 持久化。
-    global_front: shape=(k,3)，列顺序 (L2, -RSE, n_actual 附带属性)，只读前两列绘制
-    返回实际保存的图片路径列表。
-    """
-    pts = np.asarray(global_front, dtype=float)
-    if pts.ndim != 2 or pts.shape[1] < 2:
-        print("警告: 全局前沿数据格式异常，跳过主 Pareto 图绘制")
-        return []
-    pts = pts[:, :2]
-    pts = pts[np.all(np.isfinite(pts), axis=1)]
-    if pts.shape[0] == 0:
-        print("警告: 全局前沿无有效点，跳过主 Pareto 图绘制")
-        return []
-    pts = pts[np.argsort(pts[:, 0], kind='stable')]   # 按 L2 升序，把前沿连成一条曲线
-
-    plt.figure(figsize=(10, 7))
-    plt.plot(pts[:, 0], pts[:, 1], '-', color='tab:blue', linewidth=2.0, alpha=0.8,
-             zorder=1, label='Global final Pareto front')
-    plt.scatter(pts[:, 0], pts[:, 1], c='tab:blue', s=70, alpha=0.9,
-                edgecolors='k', linewidths=0.5, zorder=2)
-    plt.xlabel('Perturbation L2 Norm (obj1, smaller = more imperceptible)', fontsize=12)
-    plt.ylabel('-RSE (obj2, smaller = stronger attack)', fontsize=12)
-    plt.title('Global Final Pareto Front: L2 Norm vs -RSE (L0 as constraint)',
-              fontsize=13, fontweight='bold')
-    plt.legend(fontsize=10, loc='upper right')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    save_path = os.path.join(save_dir, 'pareto_l2_rse.png')
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"  主 Pareto 图已保存至: {save_path}")
-    plt.show()
-    return [save_path]
-
-
 def collect_global_front_solutions(all_generation_pareto):
     """复现全局最终 Pareto 前沿筛选（二维非支配），返回前沿解对应的变长决策向量列表
 
@@ -2115,90 +1981,6 @@ def plot_perturb_position_heatmap(all_generation_pareto, seq_len, num_features,
         print(f"  扰动位置频次热力图已保存至: {save_path}")
     plt.show()
     return freq
-
-
-def plot_sample_attack_compare(model, X_eval, Y_eval, X_adv_total, metrics,
-                               min_speed, max_speed, device, save_path=None):
-    """绘制 RSE 中位典型样本的攻击前后预测对比图
-
-    样本选择：按选中解 RSE 排序，取中位附近的 2 个典型样本。
-    每个子图内容（单步预测模型只输出下一时刻单个预测值，故按输入序列 + 预测点呈现）：
-      - 真实风速输入序列（蓝色实线）与攻击后输入序列（红色虚线）
-      - 下一时刻的真实值 / 干净预测 / 攻击后预测三个标记点对比
-    图内标注该样本的 L2 范数、RSE、实际扰动点数 n。
-    返回选取样本的双目标与约束变量信息列表（供 analysis_data.pkl 持久化）。
-    """
-    sel_rses = np.asarray(metrics.get('sel_rses', []))
-    n_total = len(sel_rses)
-    if n_total == 0:
-        print("警告: 无样本级攻击数据可绘图")
-        return []
-    order = np.argsort(sel_rses)
-    if n_total >= 2:
-        picks = [int(order[n_total // 2 - 1]), int(order[n_total // 2])]   # RSE 中位附近 2 个
-    else:
-        picks = [int(order[0])]
-
-    model.to(device)
-    model.eval()
-    wind_col = X_eval.shape[2] - 1        # 风速特征为 FEATURE_COLUMNS 最后一列
-    scale = max_speed - min_speed
-    typical_info = []
-
-    fig, axes = plt.subplots(len(picks), 1, figsize=(12, 5 * len(picks)))
-    axes = np.atleast_1d(axes)
-    for ax, idx in zip(axes, picks):
-        x_clean = X_eval[idx].detach().cpu().numpy()          # (seq_len, num_features) 归一化输入
-        x_adv = X_adv_total[idx].detach().cpu().numpy()       # 攻击后输入
-        y_true = Y_eval[idx].detach().cpu().item()
-        with torch.no_grad():
-            pred_clean = model(X_eval[idx].unsqueeze(0).to(device)).item()
-            pred_adv = model(X_adv_total[idx].unsqueeze(0).to(device)).item()
-
-        # 反归一化到真实风速尺度 (m/s)
-        seq_true = x_clean[:, wind_col] * scale + min_speed
-        seq_adv = x_adv[:, wind_col] * scale + min_speed
-        y_t = y_true * scale + min_speed
-        p_clean = pred_clean * scale + min_speed
-        p_adv = pred_adv * scale + min_speed
-        t_axis = np.arange(len(seq_true) + 1)
-
-        ax.plot(t_axis[:-1], seq_true, color='tab:blue', linewidth=1.8,
-                label='真实风速值 (输入窗口)')
-        ax.plot(t_axis[:-1], seq_adv, color='tab:red', linewidth=1.4, linestyle='--',
-                alpha=0.85, label='攻击后输入序列')
-        ax.plot([t_axis[-1]], [y_t], 'o', color='tab:blue', markersize=9,
-                label='真实值 (下一时刻)')
-        ax.plot([t_axis[-1]], [p_clean], '^', color='tab:green', markersize=10,
-                label='干净模型预测值')
-        ax.plot([t_axis[-1]], [p_adv], 'X', color='tab:red', markersize=11,
-                label='攻击后预测值')
-        # 标注风速特征上被扰动的位置（其他特征的扰动不改变风速曲线，仅在 L2/n 统计中体现）
-        diff_mask = np.abs(x_adv[:, wind_col] - x_clean[:, wind_col]) > 1e-12
-        if np.any(diff_mask):
-            ax.scatter(np.where(diff_mask)[0], seq_adv[diff_mask], s=90, facecolors='none',
-                       edgecolors='red', linewidths=1.6, zorder=5, label='扰动位置 (风速特征)')
-
-        l2 = metrics['sel_l2_norms'][idx]
-        rse = metrics['sel_rses'][idx]
-        n_act = metrics['sel_n_actuals'][idx]
-        ax.set_title(f'Attack Effect Comparison on Sample #{idx}\n'
-                     f'L2 = {l2:.4f}, RSE = {rse:.3f}, n_actual = {n_act}',
-                     fontsize=12, fontweight='bold')
-        ax.set_xlabel('时间步', fontsize=12)
-        ax.set_ylabel('风速 (m/s)', fontsize=12)
-        ax.legend(fontsize=9, loc='best')
-        ax.grid(True, alpha=0.3)
-        typical_info.append({'sample_idx': idx, 'l2_norm': float(l2),
-                             'rse': float(rse), 'n_actual': int(n_act)})
-
-    fig.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  典型样本攻击对比图已保存至: {save_path}")
-    plt.show()
-    return typical_info
 
 
 # =============================================================================
@@ -2455,7 +2237,9 @@ def generate_comprehensive_report(model, test_loader, val_loader, device, min_sp
 def main():
     parser = argparse.ArgumentParser(
         description='MoACB-WSF (Fixed Encoding) with NSGA-II Bi-objective Variable-length Sparse Attack (L0 as constraint)')
-    parser.add_argument('--data_file', type=str, default='winddata.xlsx', help='Input data file')
+    # 数据集文件名以全局常量 FILENAME (L95) 为唯一默认值来源，避免与硬编码字符串不同步；
+    # 命令行传参仍可临时覆盖，不传参时一律生效 FILENAME 中的设置
+    parser.add_argument('--data_file', type=str, default=FILENAME, help='Input data file')
     parser.add_argument('--no_attack', action='store_true', help='Skip NSGA-II attack evaluation')
     # 以下 NSGA-II 攻击超参数均以 NSGA2_CONFIG 为唯一默认值来源，避免出现与配置不同步的"死配置"；
     # 命令行传参仍可临时覆盖，不传参时一律生效 NSGA2_CONFIG 中的设置
@@ -2548,6 +2332,13 @@ def main():
     X_attack_pool = X_test_full
     Y_attack_pool = Y_test_full
     print(f"\n[攻击数据池] 测试集 {len(X_attack_pool)} 个样本（与「测试集性能」同口径，仅测试集）")
+
+    # 【扰动预算对齐 FGSM】按训练集逐特征计算全局 range_f = max - min（归一化空间），
+    # 与 baseline_gradient_attacks.py 的 compute_feature_ranges 完全同口径；
+    # 配合 NVITA_NSGA2(use_window_range=False)，使 NSGA-II 每点预算 = beta*range_f，与 FGSM 一致。
+    _train_X = np.stack([train_dataset[i][0].numpy() for i in range(len(train_dataset))], axis=0)  # (N_train, T, F)
+    train_feature_ranges = (_train_X.max(axis=(0, 1)) - _train_X.min(axis=(0, 1))).astype('float32')
+    print(f"[扰动预算] 训练集逐特征 range_f = {np.round(train_feature_ranges, 4).tolist()}（与 FGSM 同口径）")
 
     # ====== 判断是否触发 load_model 模式 ======
     load_model_mode = args.load_model is not None and os.path.isfile(args.load_model)
@@ -2808,7 +2599,9 @@ def main():
             print(f"{'=' * 80}")
 
             # 攻击评估数据 = 测试集（与「测试集性能」同口径）
-            feature_ranges = np.ones(num_features)
+            # 【扰动预算对齐 FGSM】使用训练集逐特征全局 range_f（替代原 np.ones），
+            # 并配合下方 use_window_range=False，使每点预算 = beta*range_f，与 FGSM 严格一致。
+            feature_ranges = train_feature_ranges
             # 按配置截取评估样本子集（None / <=0 表示使用全部）
             if args.num_eval_samples is not None and args.num_eval_samples > 0:
                 n_take = min(args.num_eval_samples, X_attack_pool.shape[0])
@@ -2836,6 +2629,7 @@ def main():
                 knee_min_rse=args.knee_min_rse,
                 insert_prob=NSGA2_CONFIG['insert_prob'],
                 delete_prob=NSGA2_CONFIG['delete_prob'],
+                use_window_range=False,   # 【扰动预算对齐 FGSM】用全局 range_f 而非逐窗口极差
             )
 
             # 评估攻击效果
@@ -2849,76 +2643,60 @@ def main():
             adv_rmse = attack_results['rmse_adv']
             rse = adv_rmse / clean_rmse if clean_rmse > 0 else 0
 
-            print(f"\n{'=' * 50}")
-            print(f"NSGA-II 双目标变长攻击汇总（L0 作为约束）")
-            print(f"{'=' * 50}")
-            print(f"干净预测 RMSE: {clean_rmse:.4f} m/s")
-            print(f"攻击后 RMSE:   {adv_rmse:.4f} m/s")
-            print(f"RSE:            {rse:.4f}")
-            print(f"R2:   干净 {attack_results['r2_clean']:.4f} → 攻击后 {attack_results['r2_adv']:.4f} "
-                  f"(下降率 {attack_results['drop_r2_pct']:.2f}%)")
-            print(f"MAPE: 干净 {attack_results['mape_clean']:.2f}% → 攻击后 {attack_results['mape_adv']:.2f}% "
-                  f"(变化率 {attack_results['chg_mape_pct']:+.2f}%)")
-            print(f"前沿平均扰动 L2:  {metrics['mean_l2_norm']:.6f}")
-            print(f"--- 选中解统计（双目标 + 约束变量） ---")
-            print(f"  obj1 扰动 L2 范数:     {metrics['mean_sel_l2_norm']:.6f}")
-            print(f"  obj2 RSE (-obj2 还原): {metrics['mean_sel_rse']:.4f}")
             n_tot = len(metrics.get('sel_n_actuals', []))
-            print(f"  n_actual 均值（约束变量，非目标）: {metrics['mean_sel_n_actual']:.3f} "
-                  f"(平均稀疏度即每样本扰动点数)")
+            print(f"\n{'=' * 70}")
+            print(f"NSGA-II 双目标变长攻击汇总（L0 作为约束）· 测试样本攻击效果")
+            print(f"{'=' * 70}")
+            print(f"评估(测试)样本数: {X_eval.shape[0]}")
+            print(f"--- 预测精度破坏程度（clean → adv，反归一化到 m/s 口径） ---")
+            print(f"  MAE :  {attack_results['mae_clean']:.4f} → {attack_results['mae_adv']:.4f} m/s "
+                  f"(Δ {attack_results['delta_mae']:+.4f}, {attack_results['chg_mae_pct']:+.2f}%)")
+            print(f"  RMSE:  {clean_rmse:.4f} → {adv_rmse:.4f} m/s "
+                  f"(Δ {attack_results['delta_rmse']:+.4f}, {attack_results['chg_rmse_pct']:+.2f}%)")
+            print(f"  MAPE:  {attack_results['mape_clean']:.2f}% → {attack_results['mape_adv']:.2f}% "
+                  f"(Δ {attack_results['delta_mape']:+.2f}, {attack_results['chg_mape_pct']:+.2f}%)")
+            print(f"  R2  :  {attack_results['r2_clean']:.4f} → {attack_results['r2_adv']:.4f} "
+                  f"(下降率 {attack_results['drop_r2_pct']:.2f}%)")
+            print(f"  RSE :  {rse:.4f}  (= 攻击后RMSE / 干净RMSE)")
+            print(f"--- 扰动规模（跨全部测试样本平均） ---")
+            print(f"  平均 L2 范数（选中解实测）: {metrics['mean_sel_l2_norm']:.6f}")
+            print(f"  平均 L0 范数（每样本扰动点数 n_actual 均值）: {metrics['mean_sel_n_actual']:.3f}")
+            print(f"  前沿平均扰动 L2（前沿全部解平均，仅作参考）: {metrics['mean_l2_norm']:.6f}")
+            print(f"  选中解平均 RSE（逐样本 RSE 均值）: {metrics['mean_sel_rse']:.4f}")
             print(f"  L0 约束 n∈[{args.n_min},{args.n_max}] 满足率: "
                   f"{metrics['constraint_feasible_cnt']}/{n_tot} "
                   f"= {metrics['constraint_feasible_rate'] * 100:.1f}%")
             n_pareto = int(metrics['global_final_pareto_obj'].shape[0]) \
                 if isinstance(metrics.get('global_final_pareto_obj'), np.ndarray) else 0
-            print(f"全局最终 Pareto 前沿解数量 (跨样本二维非支配筛选，n_actual 仅作附带属性): {n_pareto}")
-            print(f"{'=' * 50}")
+            print(f"  全局最终 Pareto 前沿解数量: {n_pareto}")
+            print(f"{'=' * 70}")
 
-            # 保存 Pareto 进化图片和数据
+            # 保存 Pareto 进化数据与【唯一保留的可视化】：随机 10 个样本的带连线 PF 进化图
             os.makedirs(f'{OUTPUT_DIR}/run{run_id + 1}', exist_ok=True)
             pareto_save_dir = f'{OUTPUT_DIR}/run{run_id + 1}'
 
             if len(all_generation_pareto) > 0:
-                last_sample_pareto = all_generation_pareto[-1]['generation_pareto']
-                if len(last_sample_pareto) > 0:
-                    plot_pareto_evolution(
-                        last_sample_pareto,
-                        n_min=args.n_min,
-                        n_max=args.n_max,
-                        pop_size=args.pop_size,
-                        save_path=f'{pareto_save_dir}/pareto_evolution.png'
-                    )
-                # 关键代数 Pareto 前沿对比图（跨样本聚合，首代/中间代/末代各一条带连线曲线）
-                plot_pareto_evolution_key_generations(
-                    all_generation_pareto,
-                    save_path=f'{pareto_save_dir}/pareto_evolution_key_generations.png'
-                )
-                # 保存所有样本的 Pareto 数据
+                # 保存所有样本的 Pareto 数据（非图片，供复现与后处理）
                 with open(f'{pareto_save_dir}/pareto_evolution_data.pkl', 'wb') as f:
                     pickle.dump(all_generation_pareto, f)
                 print(f"Pareto 进化数据已保存至: {pareto_save_dir}/pareto_evolution_data.pkl")
 
-                # 多样本 Pareto 前沿进化总览（随机抽取 10 个时间窗口，2×5 子图 + 单样本高清）
-                plot_multi_sample_pf_evolution(
-                    all_generation_pareto,
-                    n_label=f'n∈[{args.n_min},{args.n_max}]',
-                    pop_size=args.pop_size, maxiter=args.maxiter,
-                    out_dir=pareto_save_dir,
-                    select_mode=args.select_mode, knee_min_rse=args.knee_min_rse,
-                    n_min=args.n_min, n_max=args.n_max,
-                    num_samples=10, seed=args.seed
-                )
-
-                # 逐样本特定代数带连线 PF 进化图（展示每个样本的 PF 收敛趋势）
+                # 【可视化精简】本项目仅保留两张攻击可视化图：
+                #   ① 关键代数带连线 PF 进化总览图（随机抽取 10 个样本，2×5 子图合并为单张）
+                #   ② 全局 Pareto 前沿扰动位置 (t,f) 频次热力图
+                # 其余图片（单样本散点进化 / 跨样本关键代数 / 散点式多样本总览 / HV 收敛 / 双目标进化 /
+                # 全局前沿主图 / 典型样本对比）对应的绘图函数均已按要求移除
                 plot_sample_pf_evolution_key_gens(
                     all_generation_pareto,
                     out_dir=pareto_save_dir,
                     n_key_gens=5, num_samples=10, seed=args.seed
                 )
+                plot_perturb_position_heatmap(
+                    all_generation_pareto, SEQUENCE_LENGTH, num_features, feature_columns,
+                    save_path=f'{pareto_save_dir}/perturb_position_heatmap.png'
+                )
 
-            # ==================== 高级攻击分析：收敛性 / 前沿结构 / 样本级可视化 ====================
-            # 全部基于攻击结果数据做后处理（不改动攻击核心逻辑），默认自动执行
-            print(f"\n正在生成高级攻击分析图表（收敛曲线 / 前沿结构 / 样本级可视化）...")
+            # ==================== 高级攻击分析：仅保留控制台统计与 pkl 持久化（不再输出图片） ====================
             analysis_data = {
                 'config': {
                     'n_min': args.n_min, 'n_max': args.n_max,
@@ -2927,40 +2705,19 @@ def main():
                 },
             }
 
-            # 一、收敛性量化分析（二维 HV / 双目标均值与最优值 / n_actual 约束统计，逐样本计算后跨样本平均）
+            # 收敛性量化统计（二维 HV / 双目标均值与最优值 / n_actual 约束统计），仅打印与持久化
             generation_metrics = compute_generation_metrics(all_generation_pareto)
             if generation_metrics is not None:
                 analysis_data['generation_metrics'] = generation_metrics
                 # 每代 n_actual 均值（constraint variable，非 objective）控制台打印
                 print(f"  每代前沿 n_actual 均值（constraint variable，非 objective）: "
                       f"{np.round(np.asarray(generation_metrics['n_actual_mean']), 3).tolist()}")
-                plot_hv_convergence(generation_metrics,
-                                    save_path=f'{pareto_save_dir}/hv_convergence.png')
-                plot_objective_evolution(generation_metrics,
-                                         save_path=f'{pareto_save_dir}/objective_evolution.png')
 
-            # 二、最终全局 Pareto 前沿主图（L2 vs -RSE 双目标曲线；原三张两两投影合并为一张）
-            #     n_actual 仅为约束变量，已从图形编码通道（颜色条）移除，只保留统计量
             global_front = metrics.get('global_final_pareto_obj')
             if isinstance(global_front, np.ndarray) and global_front.shape[0] > 0:
                 analysis_data['global_final_pareto_obj'] = global_front
-                plot_global_pareto_front(global_front, pareto_save_dir)
 
-            # 三、样本级攻击效果可视化（RSE 中位典型样本对比 + 扰动位置频次热力图）
-            typical_info = plot_sample_attack_compare(
-                model, X_eval, Y_eval, X_adv_nsga2, metrics,
-                min_speed, max_speed, DEVICE,
-                save_path=f'{pareto_save_dir}/sample_attack_compare.png')
-            if typical_info:
-                analysis_data['typical_samples'] = typical_info
-
-            seq_len_eval = X_eval.shape[1]
-            num_features_eval = X_eval.shape[2]
-            analysis_data['perturb_position_freq'] = plot_perturb_position_heatmap(
-                all_generation_pareto, seq_len_eval, num_features_eval, feature_columns,
-                save_path=f'{pareto_save_dir}/perturb_position_heatmap.png')
-
-            # 统一持久化新增统计数据，方便后续复用
+            # 统一持久化统计数据，方便后续复用
             with open(f'{pareto_save_dir}/analysis_data.pkl', 'wb') as f:
                 pickle.dump(analysis_data, f)
             print(f"高级攻击分析数据已保存至: {pareto_save_dir}/analysis_data.pkl")
@@ -2998,11 +2755,9 @@ def main():
             print(f"  - 测试集预测: {prefix}test_set_wind_speed_predictions.csv")
         if not args.no_attack:
             print(f"  - NSGA2攻击结果: {prefix}nsga2_attack_results.pkl")
-            print(f"  - Pareto进化图: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution.png")
-            print(f"  - 关键代数Pareto前沿对比图: "
-                  f"{OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_key_generations.png")
+            print(f"  - 随机10样本PF进化总览图（单张2×5）: {OUTPUT_DIR}/run{run_id + 1}/pf_key_gens_overview.png")
+            print(f"  - 扰动位置频次热力图: {OUTPUT_DIR}/run{run_id + 1}/perturb_position_heatmap.png")
             print(f"  - Pareto进化数据: {OUTPUT_DIR}/run{run_id + 1}/pareto_evolution_data.pkl")
-            print(f"  - 高级分析图(HV收敛/双目标进化/主Pareto图/样本对比/热力图): {OUTPUT_DIR}/run{run_id + 1}/")
             print(f"  - 高级分析数据: {OUTPUT_DIR}/run{run_id + 1}/analysis_data.pkl")
         print(f"{'=' * 80}")
 

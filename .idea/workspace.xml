@@ -4,145 +4,19 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="8fde5bc4-32b1-454e-94c2-d096a9bd14c3" name="更改" comment="2026.9.4add">
-      <change afterPath="$PROJECT_DIR$/baseline_gradient_attacks.py" afterDir="false" />
+    <list default="true" id="8fde5bc4-32b1-454e-94c2-d096a9bd14c3" name="更改" comment="2026.9.11add">
+      <change afterPath="$PROJECT_DIR$/_check_cols.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/nVITA_DE_Attack.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1_comprehensive_report.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1_feature_weights.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1_modeo_cnn_optimization_continuous_lr.pkl" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1_test_set_wind_speed_predictions.csv" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/output/run1_training_loss_curve.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/windata.1h.xlsx" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/winddata3.xlsx" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/LBA-MOACB-WSF-FixedEncoding.py" beforeDir="false" afterPath="$PROJECT_DIR$/LBA-MOACB-WSF-FixedEncoding.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/LBA-MOACB-WSF.py" beforeDir="false" afterPath="$PROJECT_DIR$/LBA-MOACB-WSF.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/_test_biobj_attack.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LBA_models/lba_model_moacb_wsf.pt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/.gitignore" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/.idea/.gitignore" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/.idea/LearningBased_Atk.iml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/.idea/MarsCodeWorkspaceAppSettings.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/.idea/inspectionProfiles/profiles_settings.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/.idea/misc.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/.idea/modules.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/.idea/vcs.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/LBA_models/df_Electricity_LBA_Model_CNN_LBA_Model_target_model_CNN_seed_2210_epochs_50_lr_0.001_atk_Non_Targeted_1VITA_epsilon_0.1_adv_cnt_100_features_3_windows_4.pt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/LBA_models/store_the_well_trained_LBA_model_in_this_file.txt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/LICENSE" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/README.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/attacks/LBA/LBA_dataset.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/attacks/LBA/LBA_model.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/attacks/bim.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/attacks/fgsm.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/attacks/nvita.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/data_provider.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/datasets/CNYExch.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/datasets/Electricity.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/datasets/NZTemp.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/datasets/Oil.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/exp.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/metrics.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/models/cnn.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/models/gru.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/models/lstm.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/models/model_utils.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/picture/LBA_adversarial_attack_framework.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/requirements.txt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/results/BIM/bim_results.txt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/results/FGSM/df_Electricity_seed_2210_model_CNN_epsilon_0.1_attack_FGSM.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/results/FGSM/fgsm_results.txt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/results/LBA/lba_results.txt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/results/NVITA/df_Electricity_seed_2210_model_CNN_epsilon_0.1_attack_Non_Targeted_1VITA.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/results/NVITA/nvita_results.txt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_CNYExch_model_CNN_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_CNYExch_model_GRU_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_CNYExch_model_LSTM_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_Electricity_model_CNN_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_Electricity_model_GRU_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_Electricity_model_LSTM_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_NZTemp_model_CNN_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_NZTemp_model_GRU_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_NZTemp_model_LSTM_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_Oil_model_CNN_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_Oil_model_GRU_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/saved_models/df_Oil_model_LSTM_seed_2210.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/LearningBased_Atk/utils.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/_smoke/pareto_evolution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/_smoke/pareto_evolution_data.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/_test_biobj/hv_convergence.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/_test_biobj/objective_evolution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/_test_biobj/pareto_count_evolution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/_test_biobj/pareto_evolution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/_test_biobj/pareto_l2_rse.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.05_adv268_attack_effectiveness.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.05_adv268_clean_vs_adv_predictions.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.05_adv268_lba_training_loss.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.05_adv268_perturbation_analysis.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.05_adv268_perturbation_sign_distribution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.1_adv100_attack_effectiveness.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.1_adv100_clean_vs_adv_predictions.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.1_adv100_perturbation_analysis.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.1_adv268_attack_effectiveness.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.1_adv268_clean_vs_adv_predictions.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.1_adv268_lba_training_loss.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.1_adv268_perturbation_analysis.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.1_adv268_perturbation_sign_distribution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_attack_effectiveness.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_clean_vs_adv_predictions.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_lba_training_loss.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_perturbation_analysis.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv200_perturbation_sign_distribution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_attack_effectiveness.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_clean_vs_adv_predictions.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_lba_training_loss.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_perturbation_analysis.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/attack_figures/beta0.3_adv268_perturbation_sign_distribution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/model_ckpt.pt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/analysis_data.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/hv_convergence.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/objective_evolution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/pareto_count_evolution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/pareto_evolution.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/pareto_evolution_data.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/pareto_front_with_lba.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/pareto_l2_rse.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/pareto_n_l2.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/pareto_n_rse.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/perturb_position_heatmap.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1/sample_attack_compare.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_comprehensive_report.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_feature_weights.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_lba_attack_results.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_modeo_cnn_optimization_continuous_lr.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_nsga2_attack_results.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_evolution_comparison_connected.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_evolution_continuous_lr.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_final_gen30.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_1.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_10.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_11.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_12.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_13.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_14.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_15.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_16.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_17.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_18.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_19.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_2.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_20.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_21.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_22.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_23.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_24.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_25.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_26.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_27.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_28.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_29.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_3.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_30.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_4.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_5.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_6.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_7.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_8.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_pareto_front_generation_9.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_test_set_wind_speed_predictions.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_training_loss_curve.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/baseline_gradient_attacks.py" beforeDir="false" afterPath="$PROJECT_DIR$/baseline_gradient_attacks.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -199,10 +73,12 @@
     "LaTeX.main.executor": "Run",
     "Python.LBA-MOACB-WSF-FixedEncoding.executor": "Run",
     "Python.LBA-MOACB-WSF.executor": "Run",
+    "Python.baseline_gradient_attacks.executor": "Run",
+    "Python.nVITA_DE_Attack.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "SHARE_PROJECT_CONFIGURATION_FILES": "true",
     "git-widget-placeholder": "master1",
-    "last_opened_file_path": "C:/Users/30544/Desktop/科研入门/WindSpeedPrediction/MoACB-WSF-ADV/output",
+    "last_opened_file_path": "C:/Users/30544/Desktop/科研入门/WSF-Adversarial Attack/MoACB-WSF-ADV",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.tslint": "true",
     "node.js.selected.package.eslint": "(autodetect)",
@@ -253,7 +129,13 @@
       <workItem from="1788958110777" duration="7808000" />
       <workItem from="1788966097254" duration="1307000" />
       <workItem from="1788968902456" duration="2097000" />
-      <workItem from="1788971022417" duration="11323000" />
+      <workItem from="1788971022417" duration="20629000" />
+      <workItem from="1789178500837" duration="1143000" />
+      <workItem from="1789202520665" duration="48000" />
+      <workItem from="1789360490218" duration="1359000" />
+      <workItem from="1789391477926" duration="29018000" />
+      <workItem from="1789532777021" duration="4418000" />
+      <workItem from="1789566091288" duration="3108000" />
     </task>
     <task id="LOCAL-00001" summary="111">
       <option name="closed" value="true" />
@@ -335,7 +217,15 @@
       <option name="project" value="LOCAL" />
       <updated>1788855966321</updated>
     </task>
-    <option name="localTasksCounter" value="11" />
+    <task id="LOCAL-00011" summary="2026.9.11add">
+      <option name="closed" value="true" />
+      <created>1789092502191</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1789092502191</updated>
+    </task>
+    <option name="localTasksCounter" value="12" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -359,10 +249,13 @@
     <MESSAGE value="8.4可视化add" />
     <MESSAGE value="8.24add" />
     <MESSAGE value="2026.9.4add" />
-    <option name="LAST_COMMIT_MESSAGE" value="2026.9.4add" />
+    <MESSAGE value="2026.9.11add" />
+    <option name="LAST_COMMIT_MESSAGE" value="2026.9.11add" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$LBA_MOACB_WSF_FixedEncoding.coverage" NAME="LBA-MOACB-WSF-FixedEncoding 覆盖结果" MODIFIED="1789090439094" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$baseline_gradient_attacks.coverage" NAME="baseline_gradient_attacks 覆盖结果" MODIFIED="1789566381221" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$nVITA_DE_Attack.coverage" NAME="nVITA_DE_Attack 覆盖结果" MODIFIED="1789532968731" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$LBA_MOACB_WSF_FixedEncoding.coverage" NAME="LBA-MOACB-WSF-FixedEncoding 覆盖结果" MODIFIED="1789568180614" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$LBA_MOACB_WSF.coverage" NAME="LBA-MOACB-WSF 覆盖结果" MODIFIED="1788870853613" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>
