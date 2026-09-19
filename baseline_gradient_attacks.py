@@ -80,7 +80,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # ---------- 数据 / 模型配置（与主文件完全一致）----------
-FILENAME = 'winddata3.xlsx'
+FILENAME = 'winddata.xlsx'
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
 SEQUENCE_LENGTH = 20
@@ -142,7 +142,7 @@ FIXED_ENCODING = {
 SEED = 42                          # 与主文件一致的随机种子（保证训练可复现）
 BETA = 0.01                         # 【唯一 β，改这一行即可】稀疏 FGSM/BIM 扰动预算系数；不做 β 扫描
 BIM_STEPS = 10                     # 稀疏 BIM 迭代步数 N（n_iter）
-N_LIST = [5]                      # 扰动点数 n（即 L0 范数）列表；默认只跑单一 n=10，可用 --n_list 传多个值做扫描
+N_LIST = [4]                      # 扰动点数 n（即 L0 范数）列表；默认只跑单一 n=10，可用 --n_list 传多个值做扫描
 RSE_SUCCESS_THRESHOLD = 1.0        # 攻击成功判定阈值 τ（RSE >= τ 记为成功，用于 ASR）
 L0_EPS = 1e-8                      # L0 计数阈值：|δ| > 该值视为一次扰动
 RSE_EPS = 1e-8                     # RSE 分母保护，避免除零
