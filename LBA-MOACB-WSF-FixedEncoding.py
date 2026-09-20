@@ -142,7 +142,7 @@ NSGA2_CONFIG = {
     'n_min': 1,      # 变长编码：扰动点数下界（时序稀疏攻击场景默认 1）
     'n_max': 8,      # 变长编码：扰动点数上界（时序稀疏攻击场景默认 6）
     'beta': 0.01,     # nVITA perturbation budget factor (原论文 β)
-    'maxiter':50, # NSGA-II max generations
+    'maxiter':400, # NSGA-II max generations
     'pop_size': 20,  # NSGA-II population size（增大可提升搜索覆盖度，但每代计算量线性增加）
     'insert_prob': 0.1,  # 变长编码：插入变异概率（n+1）
     'delete_prob': 0.2,  # 变长编码：删除变异概率（n-1）【方案A】0.1→0.2：加速不可行解(n<n_min)在种群中积累，使 Deb 约束支配更快发挥作用
@@ -1221,7 +1221,9 @@ class NVITA_NSGA2:
                 mutant = np.concatenate([mutant, [float(t_new), float(f_new), p_new]])
                 n_points += 1
         # ---------- 4) 删除变异：n-1（【方案A】不再限制 n_min 下限，允许删到 0）----------
-        elif np.random.random() < self.delete_prob and n_points > 0:
+        # 【修复#2】原为 elif，与插入变异互斥，违背“各概率相互独立”设计；改为独立 if，
+        #           插入触发后仍按 delete_prob 独立掷骰，且 n_points/mutant 已在插入分支按序更新
+        if np.random.random() < self.delete_prob and n_points > 0:
             drop = int(np.random.randint(0, n_points))
             kept = [mutant[3*k:3*k+3] for k in range(n_points) if k != drop]
             # 【方案A】kept 可能为空（n_points==1 删到 0），返回空数组而非 np.concatenate([]) 报错
@@ -1785,6 +1787,82 @@ def compute_generation_metrics(all_generation_pareto):
     return generation_metrics
 
 
+def _detect_plateau_gen(curve, window=10, tol=0.02):
+    """返回最小的 g0（1-based 代数），使 g0 之后曲线任一 window 跨度的相对变化都 < tol（|·| 含下降）。
+    找不到则返回 None（表示 maxiter 内未收敛）。用于判定“逐代曲线”的收敛代数：
+    取“稳定走平且此后不再突破”的起点，避免因早期短暂平台而误报过早收敛。
+    """
+    c = np.asarray(curve, dtype=float)
+    n = len(c)
+    if n < window + 1:
+        return None
+    for g0 in range(n - window):
+        ok = True
+        for g in range(g0 + 1, n):
+            base = max(g - window, g0)
+            b, v = c[base], c[g]
+            if b > 0 and abs(v - b) / b >= tol:
+                ok = False
+                break
+        if ok:
+            return int(g0 + 1)
+    return None
+
+
+def compute_compromise_convergence(all_generation_pareto, select_mode='knee',
+                                   knee_min_rse=2.0, n_min=1, n_max=10,
+                                   l2_weight=0.3, rse_weight=0.7,
+                                   select_strategy='knee', front_percentile=0.6,
+                                   window=10, tol=0.02):
+    """逐代复用 _select_knee 选折衷解，统计其 RSE/L2/n_actual 跨样本曲线，并判定折衷解效果收敛代数。
+
+    与 HV 收敛的区别：HV 度量「前沿两端包络」（很早即平台），本函数度量「实际选中折衷解的攻击效果」
+    随代数的变化（坐于前沿内部，收敛更晚）。对每样本每代前沿调用与最终选择完全一致的 _select_knee，
+    取选中点的 RSE（= -obj[1]），跨样本求均值/中位；converge_gen 基于**中位 RSE** 曲线（典型样本口径，
+    对尾部极端样本不敏感）判定。
+
+    返回 None（无有效记录）或字典：
+        rse_mean / rse_median:  逐代折衷解 RSE 的跨样本均值 / 中位（长度 n_generations）
+        l2_mean / n_actual_mean: 逐代折衷解 L2 均值 / n_actual 均值
+        converge_gen: int 或 None —— 中位 RSE 曲线收敛代数（1-based），None 表示 maxiter 内未收敛
+        window / tol: 收敛判据参数
+        n_samples / n_generations
+    """
+    valid_recs = [rec for rec in all_generation_pareto
+                  if len(rec.get('generation_pareto', [])) > 0]
+    if not valid_recs:
+        return None
+    n_samp = len(valid_recs)
+    n_gen = max(len(rec['generation_pareto']) for rec in valid_recs)
+    rse_mat = np.full((n_samp, n_gen), np.nan)
+    l2_mat = np.full((n_samp, n_gen), np.nan)
+    n_mat = np.full((n_samp, n_gen), np.nan)
+    for s, rec in enumerate(valid_recs):
+        for g, front in enumerate(rec['generation_pareto']):
+            front = np.asarray(front, dtype=float)
+            if front.shape[0] == 0:
+                continue
+            idx = NVITA_NSGA2._select_knee(
+                front[:, :3], select_mode, knee_min_rse, n_min, n_max,
+                l2_weight=l2_weight, rse_weight=rse_weight,
+                select_strategy=select_strategy, front_percentile=front_percentile)
+            rse_mat[s, g] = -front[idx, 1]     # obj[1] = -RSE → 还原 RSE
+            l2_mat[s, g] = front[idx, 0]
+            if front.shape[1] >= 3:
+                n_mat[s, g] = front[idx, 2]
+    rse_mean = np.nanmean(rse_mat, axis=0)
+    rse_median = np.nanmedian(rse_mat, axis=0)
+    return {
+        'rse_mean': rse_mean,
+        'rse_median': rse_median,
+        'l2_mean': np.nanmean(l2_mat, axis=0),
+        'n_actual_mean': np.nanmean(n_mat, axis=0),
+        'converge_gen': _detect_plateau_gen(rse_median, window=window, tol=tol),
+        'window': window, 'tol': tol,
+        'n_samples': n_samp, 'n_generations': n_gen,
+    }
+
+
 def collect_global_front_solutions(all_generation_pareto):
     """复现全局最终 Pareto 前沿筛选（二维非支配），返回前沿解对应的变长决策向量列表
 
@@ -1868,8 +1946,8 @@ def plot_perturb_position_heatmap(all_generation_pareto, seq_len, num_features,
     return freq
 
 
-# === 新增：HV 收敛曲线（跨样本聚合 5 行子图：HV / max RSE / min L2 / 前沿点数 / n_actual 均值）===
-def plot_hv_convergence_curves(all_generation_pareto, save_path):
+# === 新增：HV 收敛曲线（跨样本聚合 5 行子图：HV / max RSE / min L2 / 前沿点数 / n_actual 均值；传入 compromise 时追加第 6 子图：折衷解 RSE 逐代收敛）===
+def plot_hv_convergence_curves(all_generation_pareto, save_path, compromise=None):
     """绘制跨样本聚合的 5 行收敛曲线
 
     从每样本每代的 Pareto 前沿后处理计算：
@@ -1878,6 +1956,7 @@ def plot_hv_convergence_curves(all_generation_pareto, save_path):
       - min L2:      前沿中 L2 最小
       - front size:  每代前沿点数（非支配解数量）
       - n_actual:    每代前沿 n_actual 均值
+      - (可选) 折衷解 RSE: 传入 compromise 时追加第 6 行，展示逐代选中折衷解的均值/中位 RSE（与 HV 对照）
     跨样本对齐（代数不齐用 NaN 填充），逐代取 nanmean 得到平均曲线；
     5 行子图共享 x 轴（Generation），每行末点标注最终值。
     """
@@ -1924,9 +2003,10 @@ def plot_hv_convergence_curves(all_generation_pareto, save_path):
     n_actual_mean = np.nanmean(n_actual_mean_mat, axis=0)
     gens = np.arange(n_gen)
 
-    # === 新增：输出可视化优化 — 从 3 子图扩展为 5 子图 ===
-    fig, axes = plt.subplots(5, 1, figsize=(10, 16), sharex=True)
-    fig.suptitle('Convergence Curves (5 Panels)', fontsize=14, fontweight='bold')
+    # === 输出可视化优化 — 5 子图；compromise 非空时追加第 6 子图（折衷解 RSE 逐代收敛）===
+    n_panels = 6 if compromise is not None else 5
+    fig, axes = plt.subplots(n_panels, 1, figsize=(10, 3.2 * n_panels), sharex=True)
+    fig.suptitle(f'Convergence Curves ({n_panels} Panels)', fontsize=14, fontweight='bold')
 
     def _annotate_final(ax, x_last, y_last, text, color):
         """末点标注最终值"""
@@ -1975,16 +2055,34 @@ def plot_hv_convergence_curves(all_generation_pareto, save_path):
     ax = axes[4]
     ax.plot(gens, n_actual_mean, 'm-', linewidth=1.5, label='n_actual mean')
     ax.set_ylabel('Mean n_actual', fontsize=10)
-    ax.set_xlabel('Generation', fontsize=11)
     ax.grid(True, alpha=0.3)
     ax.legend(loc='upper right', fontsize=8)
     _annotate_final(ax, gens[-1], n_actual_mean[-1], f'Final = {n_actual_mean[-1]:.2f}', 'purple')
+
+    # 子图 6（仅当传入 compromise）: 折衷解 RSE 逐代收敛曲线
+    #   与子图 1 的 HV 区别：HV=前沿两端包络收敛（偏早），本图=实际选中折衷解的效果收敛
+    if compromise is not None:
+        ax = axes[5]
+        ax.plot(gens, compromise['rse_mean'], 'b-o', markersize=3, linewidth=1.2,
+                label='Compromise RSE (mean)')
+        ax.plot(gens, compromise['rse_median'], 'r-s', markersize=3, linewidth=1.2,
+                label='Compromise RSE (median)')
+        cg = compromise.get('converge_gen')
+        if cg:
+            ax.axvline(cg - 1, color='gray', linestyle='--', linewidth=1.2, alpha=0.8,
+                       label=f'Converge(median) ≈ Gen {cg}')
+        ax.set_ylabel('Compromise\nRSE', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='lower right', fontsize=8)
+        _annotate_final(ax, gens[-1], compromise['rse_median'][-1],
+                        f'Final median = {compromise["rse_median"][-1]:.4f}', 'red')
+    axes[n_panels - 1].set_xlabel('Generation', fontsize=11)
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  HV 收敛曲线（5子图）已保存至: {save_path}")
+    print(f"  HV 收敛曲线（{n_panels}子图）已保存至: {save_path}")
     return save_path
 
 
@@ -2633,6 +2731,10 @@ def main():
         print(f"{'*' * 80}\n")
 
         prefix = f"{OUTPUT_DIR}/run{run_id + 1}_"
+        # 【修复】模块级 os.makedirs 仅在导入时创建一次 output/，若运行中该目录被清理或
+        # 进程工作目录与创建时不一致，基于 prefix 的保存（训练损失曲线/pickle/综合报告/
+        # feature_weights）会抛 FileNotFoundError；此处每次运行前重建，与其他 savefig 辅助函数保持一致。
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
 
         print(f'使用设备: {DEVICE}')
 
@@ -2780,6 +2882,9 @@ def main():
             plt.legend(fontsize=12, loc='best')
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
+            # 【修复】训练耗时较长，output/ 可能在训练期间被清理；保存前再确保目录存在
+            #（同时保障后续 pickle / 综合报告 / feature_weights 等基于 prefix 的写入）
+            os.makedirs(os.path.dirname(f'{prefix}training_loss_curve.png') or '.', exist_ok=True)
             plt.savefig(f'{prefix}training_loss_curve.png', dpi=300, bbox_inches='tight')
             plt.show()
 
@@ -2992,6 +3097,17 @@ def main():
             print(f"  最终 HV:      {final_hv:.4f}")
             print(f"  HV 收敛代数:  {hv_converge_gen}")
             print(f"  运行时间:     {total_time:.1f} 秒")
+            # --- 折衷解效果收敛（区别于 HV：逐代复用 _select_knee 选中折衷解，看中位 RSE 何时走平）---
+            compromise = compute_compromise_convergence(
+                all_generation_pareto, select_mode=args.select_mode,
+                knee_min_rse=args.knee_min_rse, n_min=args.n_min, n_max=args.n_max,
+                l2_weight=args.knee_l2_weight, rse_weight=args.knee_rse_weight,
+                select_strategy=args.select_strategy, front_percentile=args.front_percentile)
+            if compromise is not None and compromise['converge_gen'] is not None:
+                print(f"  折衷解收敛代数(中位RSE): Gen {compromise['converge_gen']} "
+                      f"(窗口{compromise['window']}/容差{compromise['tol']*100:.0f}%)")
+            else:
+                print(f"  折衷解收敛代数(中位RSE): {args.maxiter} 代内未收敛")
 
             # --- 选中解信息 ---
             cur_select_mode = metrics.get('select_mode', args.select_mode)
@@ -3019,7 +3135,8 @@ def main():
                 # ① HV / max RSE / min L2 / 前沿点数 / n_actual 均值 五行收敛曲线（跨样本聚合）
                 plot_hv_convergence_curves(
                     all_generation_pareto,
-                    save_path=f'{pareto_save_dir}/convergence_curves.png'
+                    save_path=f'{pareto_save_dir}/convergence_curves.png',
+                    compromise=compromise
                 )
                 # ② 随机 10 个样本的 Pareto 前沿进化网格图（2×5 子图，y 轴 = -RSE，前沿向左下收敛）
                 #    末代前沿标注 ★ 折中解（knee）与 ◆ 攻击效果最优解（max RSE）
