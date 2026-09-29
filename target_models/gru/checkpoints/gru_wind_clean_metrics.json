@@ -1,0 +1,34 @@
+{
+  "dataset": "wind",
+  "model_type": "gru",
+  "clean_metrics": {
+    "RMSE": 0.5121732618630526,
+    "MAE": 0.410648832321167,
+    "MSE": 0.26232145016743896,
+    "MAPE": 8.851920548475857,
+    "R2": 0.9512830560826588,
+    "pred_std": 2.372708559036255,
+    "true_std": 2.320474863052368,
+    "std_ratio(pred/true)": 1.022509916747883
+  },
+  "gate": {
+    "pass": true,
+    "R2": 0.9512830560826588,
+    "threshold": 0.8,
+    "persist_R2": 0.9520149130169075,
+    "non_degenerate": true,
+    "near_persistence": true,
+    "persist_margin": 0.1,
+    "attempt": 0,
+    "epochs_used": 80,
+    "hidden_size": 256
+  },
+  "persistence_baseline": {
+    "R2": 0.9520149130169075,
+    "RMSE": 0.508311609567405,
+    "MAE": 0.4088666677474976,
+    "MAPE": 8.803168691357111,
+    "n_samples": 150
+  },
+  "checkpoint": "checkpoints\\gru_wind.pt"
+}

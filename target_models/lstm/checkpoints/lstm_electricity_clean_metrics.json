@@ -1,0 +1,15 @@
+{
+  "dataset": "electricity",
+  "model_type": "lstm",
+  "clean_metrics": {
+    "RMSE": 141.7022075586833,
+    "MAE": 109.98518508092073,
+    "MSE": 20079.515627004163,
+    "MAPE": 3.220178966610711,
+    "R2": 0.9016360557863988,
+    "pred_std": 419.54998779296875,
+    "true_std": 451.81292724609375,
+    "std_ratio(pred/true)": 0.9285922612932388
+  },
+  "checkpoint": "checkpoints\\lstm_electricity.pt"
+}

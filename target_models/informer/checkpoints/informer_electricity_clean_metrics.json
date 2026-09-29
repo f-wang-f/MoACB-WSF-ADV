@@ -1,0 +1,15 @@
+{
+  "dataset": "electricity",
+  "model_type": "informer",
+  "clean_metrics": {
+    "RMSE": 130.00254300975777,
+    "MAE": 101.09435379908052,
+    "MSE": 16900.66118900392,
+    "MAPE": 2.97560030605041,
+    "R2": 0.9172083766735669,
+    "pred_std": 412.33502197265625,
+    "true_std": 451.81292724609375,
+    "std_ratio(pred/true)": 0.9126233383492023
+  },
+  "checkpoint": "checkpoints/informer_electricity.pt"
+}

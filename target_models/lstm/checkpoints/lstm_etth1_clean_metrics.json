@@ -1,0 +1,15 @@
+{
+  "dataset": "etth1",
+  "model_type": "lstm",
+  "clean_metrics": {
+    "RMSE": 1.1217930248194659,
+    "MAE": 0.77871233338763,
+    "MSE": 1.2584195905336066,
+    "MAPE": 6.337348372028383,
+    "R2": 0.9087185460659178,
+    "pred_std": 3.6151466369628906,
+    "true_std": 3.712970018386841,
+    "std_ratio(pred/true)": 0.9736536031962292
+  },
+  "checkpoint": "checkpoints\\lstm_etth1.pt"
+}

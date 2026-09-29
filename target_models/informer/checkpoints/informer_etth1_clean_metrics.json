@@ -1,0 +1,15 @@
+{
+  "dataset": "etth1",
+  "model_type": "informer",
+  "clean_metrics": {
+    "RMSE": 1.221360921225287,
+    "MAE": 0.8860416331362067,
+    "MSE": 1.4917224998962817,
+    "MAPE": 7.327657614067855,
+    "R2": 0.8917955507995726,
+    "pred_std": 3.5400185585021973,
+    "true_std": 3.712970018386841,
+    "std_ratio(pred/true)": 0.9534196454511802
+  },
+  "checkpoint": "checkpoints/informer_etth1.pt"
+}

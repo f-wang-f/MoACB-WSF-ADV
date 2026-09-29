@@ -4,47 +4,64 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1209cbf2-6f5a-43fa-a792-b732f296aa9f" name="更改" comment="">
-      <change afterPath="$PROJECT_DIR$/attacks/baselines/CW_L2_Attack.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/attacks/baselines/GenAttack.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/attacks/baselines/OnePixel_Attack.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/attacks/baselines/baseline_dense_gradient_attacks.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/attacks/baselines/baseline_gradient_attacks.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/attacks/baselines/nVITA_DE_Attack.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/attacks/lba/LBA-MOACB-WSF-FixedEncoding.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/attacks/lba/LBA-MOACB-WSF.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/ETTh1.xlsx" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/electricity.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/electricity.xlsx" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/winddata.xlsx" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/target_models/pretrained_moacb_wsf.pt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/target_models/pretrained_moacb_wsf_scripted.pt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/MarsCodeWorkspaceAppSettings.xml" beforeDir="false" />
+    <list default="true" id="1209cbf2-6f5a-43fa-a792-b732f296aa9f" name="更改" comment="2026.9.29，开始大规模实验前">
+      <change afterPath="$PROJECT_DIR$/_audit_data.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/_verify_informer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/results/_gru.log" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/results/_tcn.log" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/_create_dirs.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/cnn/checkpoints/cnn_electricity.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/cnn/checkpoints/cnn_electricity_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/cnn/checkpoints/cnn_etth1.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/cnn/checkpoints/cnn_etth1_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/cnn/checkpoints/cnn_wind.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/cnn/checkpoints/cnn_wind_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/cnn/train_cnn.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/gru/checkpoints/gru_electricity.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/gru/checkpoints/gru_electricity_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/gru/checkpoints/gru_etth1.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/gru/checkpoints/gru_etth1_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/gru/checkpoints/gru_wind.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/gru/checkpoints/gru_wind_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/gru/gru_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/gru/train_gru.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/informer/checkpoints/informer_electricity.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/informer/checkpoints/informer_electricity_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/informer/checkpoints/informer_etth1.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/informer/checkpoints/informer_etth1_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/informer/checkpoints/informer_wind.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/informer/checkpoints/informer_wind_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/informer/informer_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/informer/train_informer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/itransformer/checkpoints/itransformer_electricity.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/itransformer/checkpoints/itransformer_electricity_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/itransformer/checkpoints/itransformer_etth1.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/itransformer/checkpoints/itransformer_etth1_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/itransformer/checkpoints/itransformer_wind.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/itransformer/checkpoints/itransformer_wind_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/itransformer/itransformer_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/itransformer/train_itransformer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/lstm/checkpoints/lstm_electricity.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/lstm/checkpoints/lstm_electricity_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/lstm/checkpoints/lstm_etth1.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/lstm/checkpoints/lstm_etth1_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/lstm/checkpoints/lstm_wind.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/lstm/checkpoints/lstm_wind_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/lstm/lstm_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/lstm/train_lstm.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/tcn/checkpoints/tcn_electricity.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/tcn/checkpoints/tcn_electricity_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/tcn/checkpoints/tcn_etth1.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/tcn/checkpoints/tcn_etth1_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/tcn/checkpoints/tcn_wind.pt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/tcn/checkpoints/tcn_wind_clean_metrics.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/tcn/tcn_model.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/target_models/tcn/train_tcn.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/other.xml" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/LBA-MOACB-WSF-FixedEncoding.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/LBA-MOACB-WSF.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/MoACB-WSF-(4).pdf" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/baseline_gradient_attacks.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/nVITA_DE_Attack.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/baseline_pred_before_after_summary.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/baseline_sparse_gradient_attacks_results.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/baseline_sparse_n_l2_curve.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/baseline_sparse_n_rse_curve.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/pred_before_after/baseline_pred_before_after_SparseBIM_n4.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/pred_before_after/baseline_pred_before_after_SparseFGSM_n4.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/pred_before_after/baseline_worst_case_samples_SparseBIM_n4.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/pred_before_after/baseline_worst_case_samples_SparseFGSM_n4.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/pretrained_moacb_wsf.pt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_comprehensive_report.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_feature_weights.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_modeo_cnn_optimization_continuous_lr.pkl" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_test_set_wind_speed_predictions.csv" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/output/run1_training_loss_curve.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/windata.1h.xlsx" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/winddata.xlsx" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/winddata3.xlsx" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/ETTh1.xlsx" beforeDir="false" afterPath="$PROJECT_DIR$/data/ETTh1.xlsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/electricity.xlsx" beforeDir="false" afterPath="$PROJECT_DIR$/data/electricity.xlsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/~$ETTh1.xlsx" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -81,6 +98,10 @@
   <component name="PropertiesComponent">{
   &quot;keyToString&quot;: {
     &quot;ASKED_ADD_EXTERNAL_FILES&quot;: &quot;true&quot;,
+    &quot;Python.informer.executor&quot;: &quot;Run&quot;,
+    &quot;Python.train_cnn.executor&quot;: &quot;Run&quot;,
+    &quot;Python.train_informer.executor&quot;: &quot;Run&quot;,
+    &quot;Python.train_lstm.executor&quot;: &quot;Run&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
     &quot;git-widget-placeholder&quot;: &quot;master1&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
@@ -109,8 +130,18 @@
       <updated>1790660993688</updated>
       <workItem from="1790660999411" duration="719000" />
       <workItem from="1790662451130" duration="912000" />
-      <workItem from="1790667153533" duration="1835000" />
+      <workItem from="1790667153533" duration="6293000" />
+      <workItem from="1790676597127" duration="10663000" />
     </task>
+    <task id="LOCAL-00001" summary="2026.9.29，开始大规模实验前">
+      <option name="closed" value="true" />
+      <created>1790669240749</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1790669240749</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -118,5 +149,13 @@
   </component>
   <component name="VcsManagerConfiguration">
     <option name="ADD_EXTERNAL_FILES_SILENTLY" value="true" />
+    <MESSAGE value="2026.9.29，开始大规模实验前" />
+    <option name="LAST_COMMIT_MESSAGE" value="2026.9.29，开始大规模实验前" />
+  </component>
+  <component name="com.intellij.coverage.CoverageDataManagerImpl">
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$train_lstm.coverage" NAME="train_lstm 覆盖结果" MODIFIED="1790681230113" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/target_models/lstm" />
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$informer.coverage" NAME="informer 覆盖结果" MODIFIED="1790676716619" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/target_models" />
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$train_informer.coverage" NAME="train_informer 覆盖结果" MODIFIED="1790680579904" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/target_models" />
+    <SUITE FILE_PATH="coverage/MoACB_WSF_ADV$train_cnn.coverage" NAME="train_cnn 覆盖结果" MODIFIED="1790676981516" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/target_models/cnn" />
   </component>
 </project>

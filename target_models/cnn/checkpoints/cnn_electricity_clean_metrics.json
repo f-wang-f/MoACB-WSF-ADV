@@ -1,0 +1,30 @@
+{
+  "dataset": "electricity",
+  "model_type": "cnn",
+  "clean_metrics": {
+    "RMSE": 128.7772055086432,
+    "MAE": 100.5552354816414,
+    "MSE": 16583.56865861532,
+    "MAPE": 2.9634990037604263,
+    "R2": 0.91876172450073,
+    "pred_std": 413.7116394042969,
+    "true_std": 451.81292724609375,
+    "std_ratio(pred/true)": 0.9156702131697866
+  },
+  "gate": {
+    "pass": true,
+    "r2": 0.91876172450073,
+    "r2_threshold": 0.8,
+    "r2_ok": true,
+    "non_degenerate": true,
+    "persistence_baseline_r2": 0.8951241003745911,
+    "persist_margin": 0.1,
+    "persist_ok": true,
+    "attempt": 0,
+    "base_channels": 64,
+    "epochs": 80,
+    "patience": 10
+  },
+  "persistence_baseline_r2": 0.8951241003745911,
+  "checkpoint": "checkpoints\\cnn_electricity.pt"
+}

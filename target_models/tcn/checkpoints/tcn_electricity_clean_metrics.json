@@ -1,0 +1,39 @@
+{
+  "dataset": "electricity",
+  "model_type": "tcn",
+  "clean_metrics": {
+    "RMSE": 118.46003967121376,
+    "MAE": 94.3847602859406,
+    "MSE": 14032.780998905539,
+    "MAPE": 2.8317193162542735,
+    "R2": 0.931257321492273,
+    "pred_std": 418.8082275390625,
+    "true_std": 451.81292724609375,
+    "std_ratio(pred/true)": 0.9269505193040766
+  },
+  "gate": {
+    "pass": true,
+    "R2": 0.931257321492273,
+    "threshold": 0.8,
+    "persist_R2": 0.8948647511094432,
+    "non_degenerate": true,
+    "near_persistence": true,
+    "persist_margin": 0.1,
+    "attempt": 0,
+    "epochs_used": 80,
+    "num_channels": [
+      64,
+      128,
+      128,
+      128
+    ]
+  },
+  "persistence_baseline": {
+    "R2": 0.8948647511094432,
+    "RMSE": 146.4983800180484,
+    "MAE": 111.81510934393638,
+    "MAPE": 3.3699722031311814,
+    "n_samples": 503
+  },
+  "checkpoint": "checkpoints\\tcn_electricity.pt"
+}

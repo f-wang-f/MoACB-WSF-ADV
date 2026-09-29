@@ -1,0 +1,30 @@
+{
+  "dataset": "wind",
+  "model_type": "cnn",
+  "clean_metrics": {
+    "RMSE": 0.5198092314106428,
+    "MAE": 0.4240147129694621,
+    "MSE": 0.2702016370597232,
+    "MAPE": 9.024413821148665,
+    "R2": 0.9498195897033577,
+    "pred_std": 2.374176025390625,
+    "true_std": 2.320474863052368,
+    "std_ratio(pred/true)": 1.023142315907958
+  },
+  "gate": {
+    "pass": true,
+    "r2": 0.9498195897033577,
+    "r2_threshold": 0.8,
+    "r2_ok": true,
+    "non_degenerate": true,
+    "persistence_baseline_r2": 0.949321846323167,
+    "persist_margin": 0.1,
+    "persist_ok": true,
+    "attempt": 0,
+    "base_channels": 64,
+    "epochs": 80,
+    "patience": 10
+  },
+  "persistence_baseline_r2": 0.949321846323167,
+  "checkpoint": "checkpoints\\cnn_wind.pt"
+}

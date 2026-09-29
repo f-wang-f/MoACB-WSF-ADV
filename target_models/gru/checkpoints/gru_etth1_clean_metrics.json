@@ -1,0 +1,34 @@
+{
+  "dataset": "etth1",
+  "model_type": "gru",
+  "clean_metrics": {
+    "RMSE": 1.160179251713513,
+    "MAE": 0.8165030145341423,
+    "MSE": 1.3460158961065267,
+    "MAPE": 6.643301503803409,
+    "R2": 0.9023646095950466,
+    "pred_std": 3.623257637023926,
+    "true_std": 3.712970018386841,
+    "std_ratio(pred/true)": 0.9758381077898205
+  },
+  "gate": {
+    "pass": true,
+    "R2": 0.9023646095950466,
+    "threshold": 0.8,
+    "persist_R2": 0.9111247369186402,
+    "non_degenerate": true,
+    "near_persistence": true,
+    "persist_margin": 0.1,
+    "attempt": 0,
+    "epochs_used": 80,
+    "hidden_size": 256
+  },
+  "persistence_baseline": {
+    "R2": 0.9111247369186402,
+    "RMSE": 1.1069089798646707,
+    "MAE": 0.750815268028567,
+    "MAPE": 6.0029438180111185,
+    "n_samples": 471
+  },
+  "checkpoint": "checkpoints\\gru_etth1.pt"
+}

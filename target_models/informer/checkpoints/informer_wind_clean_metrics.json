@@ -1,0 +1,15 @@
+{
+  "dataset": "wind",
+  "model_type": "informer",
+  "clean_metrics": {
+    "RMSE": 0.5424015984182651,
+    "MAE": 0.42096442699432374,
+    "MSE": 0.2941994939666889,
+    "MAPE": 9.01166653126622,
+    "R2": 0.9453628354107644,
+    "pred_std": 2.374664306640625,
+    "true_std": 2.320474863052368,
+    "std_ratio(pred/true)": 1.023352738894121
+  },
+  "checkpoint": "checkpoints/informer_wind.pt"
+}

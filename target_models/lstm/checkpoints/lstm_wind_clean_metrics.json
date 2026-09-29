@@ -1,0 +1,15 @@
+{
+  "dataset": "wind",
+  "model_type": "lstm",
+  "clean_metrics": {
+    "RMSE": 0.5231215974991686,
+    "MAE": 0.41328566074371337,
+    "MSE": 0.2736562057700822,
+    "MAPE": 8.913110752184409,
+    "R2": 0.9491780255841682,
+    "pred_std": 2.3630993366241455,
+    "true_std": 2.320474863052368,
+    "std_ratio(pred/true)": 1.0183688581373773
+  },
+  "checkpoint": "checkpoints\\lstm_wind.pt"
+}

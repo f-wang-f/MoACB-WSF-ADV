@@ -1,0 +1,30 @@
+{
+  "dataset": "etth1",
+  "model_type": "cnn",
+  "clean_metrics": {
+    "RMSE": 1.1573459185441028,
+    "MAE": 0.8267398882823386,
+    "MSE": 1.3394495751706932,
+    "MAPE": 6.69266008990811,
+    "R2": 0.902840908062211,
+    "pred_std": 3.524746894836426,
+    "true_std": 3.712970018386841,
+    "std_ratio(pred/true)": 0.949306586743423
+  },
+  "gate": {
+    "pass": true,
+    "r2": 0.902840908062211,
+    "r2_threshold": 0.8,
+    "r2_ok": true,
+    "non_degenerate": true,
+    "persistence_baseline_r2": 0.9111177995739372,
+    "persist_margin": 0.1,
+    "persist_ok": true,
+    "attempt": 0,
+    "base_channels": 64,
+    "epochs": 80,
+    "patience": 10
+  },
+  "persistence_baseline_r2": 0.9111177995739372,
+  "checkpoint": "checkpoints\\cnn_etth1.pt"
+}

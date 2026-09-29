@@ -1,0 +1,35 @@
+{
+  "dataset": "etth1",
+  "model_type": "itransformer",
+  "clean_metrics": {
+    "RMSE": 1.1501746612211088,
+    "MAE": 0.8155269744289908,
+    "MSE": 1.3229017513150922,
+    "MAPE": 6.611840255672257,
+    "R2": 0.9040412306194463,
+    "pred_std": 3.6333348751068115,
+    "true_std": 3.712970018386841,
+    "std_ratio(pred/true)": 0.9785521717421228
+  },
+  "gate": {
+    "pass": true,
+    "R2": 0.9040412306194463,
+    "threshold": 0.8,
+    "persist_R2": 0.9111247369186402,
+    "non_degenerate": true,
+    "near_persistence": true,
+    "persist_margin": 0.1,
+    "attempt": 0,
+    "epochs_used": 80,
+    "d_model": 128,
+    "e_layers": 2
+  },
+  "persistence_baseline": {
+    "R2": 0.9111247369186402,
+    "RMSE": 1.1069089798646707,
+    "MAE": 0.750815268028567,
+    "MAPE": 6.0029438180111185,
+    "n_samples": 471
+  },
+  "checkpoint": "checkpoints\\itransformer_etth1.pt"
+}

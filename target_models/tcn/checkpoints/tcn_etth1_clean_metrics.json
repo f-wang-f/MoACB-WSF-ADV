@@ -1,0 +1,39 @@
+{
+  "dataset": "etth1",
+  "model_type": "tcn",
+  "clean_metrics": {
+    "RMSE": 1.1045284780458475,
+    "MAE": 0.7639048448793447,
+    "MSE": 1.2199831588142762,
+    "MAPE": 6.173714906118242,
+    "R2": 0.9115065933895381,
+    "pred_std": 3.550166368484497,
+    "true_std": 3.712970018386841,
+    "std_ratio(pred/true)": 0.9561527162629682
+  },
+  "gate": {
+    "pass": true,
+    "R2": 0.9115065933895381,
+    "threshold": 0.8,
+    "persist_R2": 0.9111247369186402,
+    "non_degenerate": true,
+    "near_persistence": true,
+    "persist_margin": 0.1,
+    "attempt": 0,
+    "epochs_used": 80,
+    "num_channels": [
+      64,
+      128,
+      128,
+      128
+    ]
+  },
+  "persistence_baseline": {
+    "R2": 0.9111247369186402,
+    "RMSE": 1.1069089798646707,
+    "MAE": 0.750815268028567,
+    "MAPE": 6.0029438180111185,
+    "n_samples": 471
+  },
+  "checkpoint": "checkpoints\\tcn_etth1.pt"
+}
