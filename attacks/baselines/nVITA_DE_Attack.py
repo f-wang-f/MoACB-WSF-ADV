@@ -74,10 +74,11 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 # =============================================================================
-# 通过 importlib 复用同目录的 LBA-MOACB-WSF-FixedEncoding.py（文件名含连字符）
+# 通过 importlib 复用 attacks/lba/ 下的 LBA-MOACB-WSF-FixedEncoding.py（文件名含连字符）
 # =============================================================================
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SRC_PATH = os.path.join(_HERE, 'LBA-MOACB-WSF-FixedEncoding.py')
+# 本脚本在 attacks/baselines/，主文件在 attacks/lba/，按相对路径定位并规范化为绝对路径
+_SRC_PATH = os.path.abspath(os.path.join(_HERE, '..', 'lba', 'LBA-MOACB-WSF-FixedEncoding.py'))
 _spec = importlib.util.spec_from_file_location('fixed_encoding_mod', _SRC_PATH)
 fe = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(fe)   # 仅执行其顶层定义（不触发 main，__name__ != '__main__'）
@@ -110,9 +111,9 @@ LAMBDA_REG = fe.LAMBDA_REG
 #   （global_feature_ranges 在 main 中按训练集全部窗口逐特征 max-min 计算，与 NSGA-II train_feature_ranges/FGSM 同口径）；
 #   nVITA_DE_Attack 仍保留逐窗口极差作为 global_feature_ranges=None 时的回退，beta 值三者一致
 DE_CONFIG = {
-    'n_points': 5,        # 固定扰动点数 N（非变长；与 NSGA2_CONFIG['n_max']=5 上界口径对齐）
-    'beta': 0.01,         # nVITA perturbation budget factor (原论文 β)，与 NSGA2_CONFIG['beta'] 一致
-    'maxiter': 20,        # DE 最大代数（与 NSGA-II 对比设置对齐）
+    'n_points': 1,        # 固定扰动点数 N（非变长；与 NSGA2_CONFIG['n_max']=5 上界口径对齐）
+    'beta': 0.02,         # nVITA perturbation budget factor (原论文 β)，与 NSGA2_CONFIG['beta'] 一致
+    'maxiter': 200,        # DE 最大代数（与 NSGA-II 对比设置对齐）
     'pop_size': 10,       # DE 种群大小（与 NSGA2_CONFIG['pop_size'] 对齐）
     'de_f': 0.5,          # DE 缩放因子 F（nVITA 标准值）
     'de_cr': 0.9,         # DE 交叉概率 CR（nVITA 标准值）
@@ -127,14 +128,18 @@ DE_F = DE_CONFIG['de_f']
 DE_CR = DE_CONFIG['de_cr']
 BETA = DE_CONFIG['beta']
 
-OUTPUT_DIR = 'output'
+OUTPUT_DIR = fe.OUTPUT_DIR
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 【模型来源·控制变量】优先加载 output/pretrained_moacb_wsf.pt——该权重由主文件
+# 【权重专用目录】与主文件 / baseline 统一，从 output/ 拆分出来集中存放权重文件
+WEIGHTS_DIR = fe.WEIGHTS_DIR
+os.makedirs(WEIGHTS_DIR, exist_ok=True)
+
+# 【模型来源·控制变量】优先加载 weights/pretrained_moacb_wsf.pt——该权重由主文件
 #   LBA-MOACB-WSF-FixedEncoding.py 用同一固定编码训练并保存（--save_model），
 #   保证 DE 与 NSGA-II / FGSM 在【同一基准模型】上对比（绝不逐次重训，避免 GPU 非确定性漂移）。
 #   若 checkpoint 缺失，则用同一固定编码按主文件训练流程重训一次并保存。
-PRETRAINED_CKPT = os.path.join(OUTPUT_DIR, 'pretrained_moacb_wsf.pt')
+PRETRAINED_CKPT = os.path.join(WEIGHTS_DIR, 'pretrained_moacb_wsf.pt')
 
 # 中文字体与负号显示
 plt.rcParams['font.family'] = ['SimHei', 'Microsoft YaHei', 'SimSun', 'DejaVu Sans']
@@ -606,6 +611,33 @@ def build_or_load_model(data_result, load_path=None, seed=42):
     print(f'    Setting: {setting}')
 
     ckpt_path = load_path if load_path else PRETRAINED_CKPT
+    scripted_path = fe.scripted_ckpt_path(ckpt_path)
+
+    # ---------- 0) 最优先：加载 TorchScript 脚本（不定义模型类、不用编码重建结构，直接推理） ----------
+    #   DE 为无梯度黑盒攻击，traced 模块的 model.eval()/model(x) 与 nn.Module 完全同口径。
+    #   为不破坏【编码一致性保证】，若同名 state_dict checkpoint 存在则先核对其编码，一致才采用脚本。
+    if scripted_path and os.path.isfile(scripted_path):
+        enc_ok = True
+        if ckpt_path and os.path.isfile(ckpt_path):
+            try:
+                ck = torch.load(ckpt_path, map_location=DEVICE)
+                ck_enc = _ckpt_encoding(ck)
+                if ck_enc is None:
+                    print(f"\n>>> checkpoint 未携带编码字段，无法核对，跳过 TorchScript，走 state_dict/重训路径。")
+                    enc_ok = False
+                elif [ck_enc[0], ck_enc[1], ck_enc[2], ck_enc[3]] != target_enc:
+                    print(f"\n>>> 警告：checkpoint 编码与 FIXED_ENCODING 不一致，TorchScript 视为无效，将重训！")
+                    print(f'    checkpoint topo:    {ck_enc[0]}')
+                    print(f'    FIXED_ENCODING topo:{topo}')
+                    enc_ok = False
+            except Exception as e:
+                print(f"\n>>> 读取 checkpoint 编码失败（{e}），跳过 TorchScript。")
+                enc_ok = False
+        if enc_ok:
+            smodel = fe.load_scripted_model(scripted_path)
+            if smodel is not None:
+                print(f"\n>>> 已加载 TorchScript 基准模型（无需模型类定义）: {scripted_path}（跳过训练）")
+                return smodel
 
     # ---------- 1) 优先尝试加载已有权重（须编码核对通过） ----------
     if ckpt_path and os.path.isfile(ckpt_path):
@@ -641,6 +673,8 @@ def build_or_load_model(data_result, load_path=None, seed=42):
         'topo': topo, 'cnn_params': cnn_params, 'lstm_params': lstm_params, 'setting': setting,
     }, save_path)
     print(f"\n>>> 训练完成，权重（含 FIXED_ENCODING 编码字段）已保存至: {save_path}")
+    # 额外导出 TorchScript，供后续运行（含本脚本、baseline、主文件）不定义模型类直接加载推理
+    fe.export_scripted_model(model, fe.scripted_ckpt_path(save_path), num_features=num_features)
     return model
 
 
@@ -850,7 +884,7 @@ def print_comparison_table(de_metrics, nsga2_res):
 def main():
     parser = argparse.ArgumentParser(
         description='nVITA DE 单目标稀疏对抗攻击（与 NSGA-II 双目标变长编码对比）')
-    parser.add_argument('--data_file', type=str, default='winddata.xlsx', help='输入数据文件')
+    parser.add_argument('--data_file', type=str, default=fe.FILENAME, help='输入数据文件')
     parser.add_argument('--load_model', type=str, default=None,
                         help=f'基准模型 checkpoint 路径（默认 {PRETRAINED_CKPT}）')
     # 以下 DE 攻击超参均以 DE_CONFIG 为唯一默认值来源（与主文件 NSGA2_CONFIG 的做法一致），

@@ -60,6 +60,7 @@ MoACB-WSF with Fixed Manual Encoding (NSGA-II 变长编码双目标稀疏攻击�
 
 import os
 import sys
+import io
 import ast
 import json
 import random
@@ -83,18 +84,43 @@ from scipy.stats import pearsonr
 
 warnings.filterwarnings('ignore')
 
+# 【Windows 控制台兼容】默认 GBK 编码无法输出 R² / δ / β 等字符（UnicodeEncodeError），
+#   与 baseline_gradient_attacks.py / nVITA_DE_Attack.py 保持一致，统一将控制台切到 UTF-8。
+if os.name == 'nt':
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)   # 65001 = UTF-8 代码页
+    except Exception:
+        pass
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # ==================== Global Configuration ====================
 plt.rcParams["font.family"] = ["SimHei", "Microsoft YaHei", "SimSun", "DejaVu Sans"]
 plt.rcParams['axes.unicode_minus'] = False
 
-OUTPUT_DIR = 'output'
+# 【路径基准】脚本已归入 attacks/lba/，数据/权重/结果目录统一以项目根目录为基准，
+#   由 __file__ 推导绝对路径，保证在任意工作目录下运行都能正确定位（不再依赖 CWD）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
+DATA_DIR = os.path.join(_PROJECT_ROOT, 'data')
+
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT, 'results')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_DIR, 'attack_results'), exist_ok=True)
+
+# 【权重专用目录】与图表/CSV 等输出分离，集中存放 .pt / *_scripted.pt 权重文件；
+#   三个脚本（主文件 / nVITA_DE_Attack / baseline_gradient_attacks）统一指向此目录。
+WEIGHTS_DIR = os.path.join(_PROJECT_ROOT, 'target_models')
+os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # ==================== MoACB-WSF Configuration ====================
-FILENAME = 'winddata.xlsx'
+FILENAME = os.path.join(DATA_DIR, 'winddata.xlsx')
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
 SEQUENCE_LENGTH =20
@@ -141,9 +167,9 @@ BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 NSGA2_CONFIG = {
     'n_min': 1,      # 变长编码：扰动点数下界（时序稀疏攻击场景默认 1）
     'n_max': 8,      # 变长编码：扰动点数上界（时序稀疏攻击场景默认 6）
-    'beta': 0.01,     # nVITA perturbation budget factor (原论文 β)
-    'maxiter':400, # NSGA-II max generations
-    'pop_size': 20,  # NSGA-II population size（增大可提升搜索覆盖度，但每代计算量线性增加）
+    'beta': 0.008,     # nVITA perturbation budget factor (原论文 β)
+    'maxiter':200, # NSGA-II max generations
+    'pop_size': 60,  # NSGA-II population size（增大可提升搜索覆盖度，但每代计算量线性增加）
     'insert_prob': 0.1,  # 变长编码：插入变异概率（n+1）
     'delete_prob': 0.2,  # 变长编码：删除变异概率（n-1）【方案A】0.1→0.2：加速不可行解(n<n_min)在种群中积累，使 Deb 约束支配更快发挥作用
     'select_mode': 'knee',   # 最终解选择策略：'knee'=归一化折中膝点 / 'max_rse'=攻击强度上界端点
@@ -151,7 +177,7 @@ NSGA2_CONFIG = {
     'select_strategy': 'percentile',      # 折中解选点策略（在过滤后的候选集上二选一）：'knee'=距参考点最近 / 'percentile'=按L2分位数取点
     'knee_l2_weight': 0.5,   # knee策略：折中解参考点 L2 维分量（归一化空间 0~1）：越小越接近理想点(左下)
     'knee_rse_weight': 0.5,  # knee策略：折中解参考点 -RSE 维分量（归一化空间 0~1）：越大越偏攻击效果一侧
-    'front_percentile': 0.6, # percentile策略：候选解按 L2 升序后取第 int(k*该值) 个位置（0~1，默认60%分位）
+    'front_percentile': 0.7, # percentile策略：候选解按 L2 升序后取第 int(k*该值) 个位置（0~1，默认60%分位）
     'num_eval_samples': None, # 参加 NSGA-II 评估的样本数量（None 或 <=0 表示使用数据池全部样本，正整数则从数据池头部截取该数量的样本）
 
     # ===== 敏感度引导退火（永久启用）=====
@@ -162,6 +188,12 @@ NSGA2_CONFIG = {
     'candidate_pool_size': 40,
     'guided_ratio_start': 0.6,
     'guided_ratio_end': 0.3,
+
+    # ===== 早停（折衷解双指标任一刷新即重置耐心）=====
+    # warmup 代之前不判停；之后每代选折衷点，若 L2 刷新历史最小 或 RSE 刷新历史最大则重置计数；
+    # 两个指标连续 patience 代都未刷新 -> 早停。patience<=0 表示禁用。
+    'early_stop_patience': 20,
+    'early_stop_warmup': 0,
 }
 
 # 扰动幅值 p 的离散档位数（20 档位整数编码）
@@ -378,6 +410,68 @@ class HybridCNNBiLSTM(nn.Module):
         return final
 
 
+# =============================================================================
+# SECTION 2.5: TorchScript 导出 / 加载（权重文件可脱离模型类定义直接推理）
+# =============================================================================
+# 【动机】现有 checkpoint = {model_state_dict + topo/cnn_params/lstm_params/setting} 在加载时
+#   必须先用结构编码重建 HybridCNNBiLSTM 再 load_state_dict，无法【不定义模型类直接推理】。
+#   TorchScript trace 把「权重 + 计算图」整体序列化进一个文件，加载端 torch.jit.load 后即为可调用
+#   模块，既不需要 import 模型类、也不需要再提供结构编码；且 traced 模块保留 autograd，可对【输入】
+#   求梯度，因此 NSGA-II / nVITA-DE（无梯度黑盒）与 SparseFGSM / SparseBIM（输入梯度白盒）均可复用。
+# 【命名约定】TorchScript 文件与 state_dict checkpoint 同目录同名，仅追加 _scripted 后缀：
+#   weights/pretrained_moacb_wsf.pt -> weights/pretrained_moacb_wsf_scripted.pt
+def scripted_ckpt_path(ckpt_path):
+    """由 state_dict checkpoint 路径推导其 TorchScript 脚本路径（同名 + _scripted.pt 后缀）。"""
+    stem, _ = os.path.splitext(ckpt_path)
+    return stem + '_scripted.pt'
+
+
+def export_scripted_model(model, save_path, num_features=None):
+    """把已定结构的模型 trace 成 TorchScript 并保存（内嵌权重+计算图，加载无需模型类）。
+    失败时打印告警并返回 False，不影响已保存的 state_dict checkpoint。"""
+    base = model.module if isinstance(model, nn.DataParallel) else model
+    nf = num_features if num_features is not None else getattr(base, 'num_features', None)
+    if nf is None:
+        print('>>> TorchScript 导出跳过：无法确定 num_features 以构造 trace 样例输入。')
+        return False
+    was_training = base.training
+    base.eval()
+    try:
+        example = torch.rand(1, SEQUENCE_LENGTH, nf, device=DEVICE, dtype=torch.float32)
+        with torch.no_grad():
+            traced = torch.jit.trace(base, example)
+        os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+        # 【中文/非 ASCII 路径兼容】torch.jit.save 直接传路径会走 C++ 归档器，在 Windows 非 ASCII
+        # 路径上报 "Parent directory ... does not exist"；改为先存内存 BytesIO，再用普通文件写入落盘。
+        buf = io.BytesIO()
+        torch.jit.save(traced, buf)
+        with open(save_path, 'wb') as f:
+            f.write(buf.getvalue())
+        print(f'>>> TorchScript 模型已导出（含权重+结构，加载无需模型类）: {save_path}')
+        return True
+    except Exception as e:
+        print(f'>>> TorchScript 导出失败（{e}），仅保留 state_dict checkpoint。')
+        return False
+    finally:
+        if was_training:
+            base.train()
+
+
+def load_scripted_model(path):
+    """尝试以 TorchScript 方式加载模型（无需模型类定义）；文件不存在或加载失败返回 None。
+    同样经 BytesIO 中转以兼容中文/非 ASCII 路径。"""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, 'rb') as f:
+            buf = io.BytesIO(f.read())
+        m = torch.jit.load(buf, map_location=DEVICE)
+        m.eval()
+        return m
+    except Exception as e:
+        print(f'>>> TorchScript 加载失败（{e}），回退到 state_dict+编码 路径。')
+        return None
+
 
 # =============================================================================
 # SECTION 3: 混合编码向量的编码 / 解码 / 合法性校验（输入编码 → 具体模型）
@@ -487,7 +581,8 @@ class NVITA_NSGA2:
                  candidate_pool_size=20,
                  guided_ratio_start=0.6, guided_ratio_end=0.3,
                  knee_l2_weight=0.3, knee_rse_weight=0.7,
-                 select_strategy='knee', front_percentile=0.6):
+                 select_strategy='knee', front_percentile=0.6,
+                 early_stop_patience=20, early_stop_warmup=50):
         # ====== 【变长编码】用 [n_min, n_max] 区间取代原固定 self.n ======
         self.n_min = max(1, int(n_min))            # 扰动点数下界
         self.n_max = max(self.n_min, int(n_max))   # 扰动点数上界（自动纠正 n_min > n_max 的误配置）
@@ -534,6 +629,9 @@ class NVITA_NSGA2:
         self.seq_len = 0
         self.num_features = 0
         self.device = None
+        # ====== 【早停】折衷解双指标任一刷新即重置耐心 ======
+        self.early_stop_patience = int(early_stop_patience)
+        self.early_stop_warmup = int(early_stop_warmup)
 
     def _get_window_range(self, x_np):
         """计算当前样本每个特征的窗口极差（对齐官方 calculate_test_window_ranges）"""
@@ -618,18 +716,24 @@ class NVITA_NSGA2:
         sensitivity = np.zeros((self.seq_len, self.num_features), dtype=float)
         x_base = np.asarray(x_window, dtype=float).copy()
         ranges_arr = np.asarray(ranges, dtype=float)
-        for t in range(self.seq_len):
-            for f in range(self.num_features):
-                if f not in allowed_set:
-                    continue
+        # 【批量化】先按原顺序收集所有“允许特征”的位置，一次性构造 (M,T,F) 扰动批，单次前向，
+        #   再把 |pred - pred_clean| 填回对应 (t,f)。非法特征位置敏感度保持 0，口径与原逐位置实现一致；
+        #   query_count 按 M 累加（等价于原来逐位置各加 1）。前向不消耗 np.random，随机流不受影响。
+        probe_positions = [(t, f) for t in range(self.seq_len) for f in range(self.num_features)
+                           if f in allowed_set]
+        if len(probe_positions) > 0:
+            batch = np.empty((len(probe_positions), self.seq_len, self.num_features), dtype=float)
+            for bi, (t, f) in enumerate(probe_positions):
                 delta = 0.5 * self.epsilon * float(ranges_arr[f])
                 x_test = x_base.copy()
                 x_test[t, f] += delta
-                with torch.no_grad():
-                    pred_test = self.model(
-                        torch.FloatTensor(x_test[None]).to(self.device)).item()
-                self.query_count += 1
-                sensitivity[t, f] = abs(pred_test - pred_clean)
+                batch[bi] = x_test
+            with torch.no_grad():
+                preds = self.model(
+                    torch.FloatTensor(batch).to(self.device)).detach().cpu().numpy().reshape(-1)
+            self.query_count += len(probe_positions)
+            for bi, (t, f) in enumerate(probe_positions):
+                sensitivity[t, f] = abs(float(preds[bi]) - pred_clean)
         return sensitivity
     
     def _build_candidate_pool(self, sensitivity, k):
@@ -804,6 +908,60 @@ class NVITA_NSGA2:
         n_actual = float(len(perturbation_map))
 
         return np.array([l2_norm, neg_rse]), n_actual
+
+    def _evaluate_objectives_batch(self, x_np, y_val, individuals, device):
+        """【批量前向评估】与 _evaluate_objectives 逐个体口径完全一致，仅把 N 个个体的前向合成一次：
+        变长个体编码无法 stack，故只 stack【扰动后的输入】(N,T,F)，一次 GPU 前向拿 (N,) 预测。
+        - clean 预测复用 self._clean_pred_cache，不重新查询（仅在缓存缺失时回退现算并计 1 次）。
+        - 每个个体的 L2（合并重复位置后的 perturbation_map）、RSE、n_actual 仍逐个体在 numpy 上算，
+          与原单个体方法逻辑一字不差。
+        - query_count：一批 N 个个体累加 N（保持“评估了 N 个扰动样本”的口径）。
+        返回：(objectives shape=(N,2) [L2, -RSE], n_actual shape=(N,))
+        """
+        n = len(individuals)
+        if n == 0:
+            return np.zeros((0, 2)), np.zeros(0)
+        # CPU 上逐个体应用扰动得到 (1,T,F)，再沿 batch 维拼成 (N,T,F)，一次上 GPU 前向
+        x_adv_list = [self._apply_perturbation(x_np, ind) for ind in individuals]
+        x_batch = np.concatenate(x_adv_list, axis=0)
+        with torch.no_grad():
+            pred_adv = self.model(
+                torch.FloatTensor(x_batch).to(device)).detach().cpu().numpy().reshape(-1)
+        self.query_count += n
+        # clean 预测：优先复用缓存（与单个体版一致）；缺失时现算一次并计数
+        if self._clean_pred_cache is not None:
+            pred_clean = self._clean_pred_cache
+        else:
+            with torch.no_grad():
+                pred_clean = self.model(torch.FloatTensor(x_np).to(device)).item()
+            self.query_count += 1
+
+        seq_len = x_np.shape[1]
+        num_features = x_np.shape[2]
+        clean_mse = (pred_clean - y_val) ** 2
+        objectives = np.zeros((n, 2))
+        n_actuals = np.zeros(n)
+        for i, individual in enumerate(individuals):
+            # 重建 perturbation_map（与 _apply_perturbation / 单个体评估完全一致：重复位置幅值相加）
+            n_points = self._num_points(individual)
+            perturbation_map = {}
+            for k in range(n_points):
+                t = int(np.clip(round(individual[3 * k]), 0, seq_len - 1))
+                f = int(np.clip(round(individual[3 * k + 1]), 0, num_features - 1))
+                p = individual[3 * k + 2]
+                key = (t, f)
+                if key in perturbation_map:
+                    perturbation_map[key] += p
+                else:
+                    perturbation_map[key] = p
+            # 目标1: 扰动 L2；目标2: -RSE（与单个体版同口径）
+            l2_norm = np.sqrt(sum(p ** 2 for p in perturbation_map.values()))
+            adv_mse = (float(pred_adv[i]) - y_val) ** 2
+            rse = np.sqrt(adv_mse / clean_mse) if clean_mse > 1e-10 else 10.0
+            objectives[i, 0] = l2_norm
+            objectives[i, 1] = -rse
+            n_actuals[i] = float(len(perturbation_map))
+        return objectives, n_actuals
 
     def _constraint_violation(self, n_actual_arr):
         """【L0 约束】计算违约度 cv = max(0, n_actual - n_max) + max(0, n_min - n_actual)
@@ -1273,6 +1431,11 @@ class NVITA_NSGA2:
                      'budget_clip_cnt': 0, 'budget_clip_tot': 0,  # 预算截断改变 p 的点数 / 总点数
                      'empty_after_cross': 0, 'empty_after_mut': 0, 'cross_mut_tot': 0}  # 空个体率
 
+        # 【早停】每样本独立重置历史最佳与计数器；从第0代就开始追踪最佳，warmup 期间只更新不判停
+        self._best_l2 = float('inf')
+        self._best_rse = -float('inf')
+        self._es_counter = 0
+
         allowed_features = self._sample_features(num_features)
         ranges = self._get_window_range(x_np)
 
@@ -1307,17 +1470,27 @@ class NVITA_NSGA2:
                 self.first_success_query = self.query_count
             return obj, n_act
 
+        # 【批量评估 + first_success_query 跟踪】一次批量前向评估整批个体，再按 batch 顺序逐个套用达标跟踪。
+        #   口径与逐个体 _eval_and_track 完全一致：原实现“评估完第 j 个个体后 query_count=批前值+(j+1)，
+        #   若此时首次达标则记录该值”，故本批第一个达标个体 j 记录 q_before+(j+1)。
+        def _eval_batch_and_track(inds):
+            q_before = self.query_count
+            objs, n_acts = self._evaluate_objectives_batch(x_np, y_val, inds, device)
+            if self.first_success_query < 0:
+                for j in range(objs.shape[0]):
+                    if (-objs[j, 1]) >= self.knee_min_rse:
+                        self.first_success_query = q_before + (j + 1)
+                        break
+            return objs, n_acts
+
         # ========== 1. 种群初始化（【变长编码】每个个体的 n 独立随机采样，种群用 list 承载）==========
         population = [
             self._init_individual(seq_len, num_features, allowed_features, ranges)
             for _ in range(self.pop_size)
         ]
 
-        # ========== 2. 初始种群评估双目标 + 约束变量 ==========
-        objectives = np.zeros((self.pop_size, 2))          # 双目标 [L2, -RSE]，形状恒为 (N, 2)
-        n_actual_pop = np.zeros(self.pop_size)             # 约束变量 n_actual（不进入 objectives）
-        for i in range(self.pop_size):
-            objectives[i], n_actual_pop[i] = _eval_and_track(population[i])
+        # ========== 2. 初始种群评估双目标 + 约束变量（一次批量前向）==========
+        objectives, n_actual_pop = _eval_batch_and_track(population)   # (pop_size,2), (pop_size,)
 
         # ========== 3. 每代 Pareto 前沿记录 ==========
         generation_pareto = []
@@ -1333,6 +1506,38 @@ class NVITA_NSGA2:
             if len(fronts) > 0:
                 gen_front = np.column_stack([objectives[fronts[0]], n_actual_pop[fronts[0]]])
                 generation_pareto.append(gen_front.copy())
+
+                # ====== 【早停】折衷解双指标任一刷新即重置耐心 ======
+                # 每代用 _select_knee 选折衷点，取其 L2 和 RSE；
+                # L2 刷新历史最小 或 RSE 刷新历史最大 -> 重置计数；连续 patience 代都没刷新 -> 早停
+                # warmup 代之前只更新最佳、不判停（gen>=warmup 即第 warmup+1 代起才计入耐心）
+                knee_pos_es = self._select_knee(
+                    gen_front, self.select_mode, self.knee_min_rse,
+                    self.n_min, self.n_max,
+                    l2_weight=self.knee_l2_weight,
+                    rse_weight=self.knee_rse_weight,
+                    select_strategy=self.select_strategy,
+                    front_percentile=self.front_percentile)
+                cur_l2_es = float(gen_front[knee_pos_es, 0])
+                cur_rse_es = float(-gen_front[knee_pos_es, 1])
+                improved_es = False
+                if cur_l2_es < self._best_l2:
+                    self._best_l2 = cur_l2_es
+                    improved_es = True
+                if cur_rse_es > self._best_rse:
+                    self._best_rse = cur_rse_es
+                    improved_es = True
+                if improved_es:
+                    self._es_counter = 0
+                else:
+                    self._es_counter += 1
+                if (self.early_stop_patience > 0
+                        and gen >= self.early_stop_warmup
+                        and self._es_counter >= self.early_stop_patience):
+                    print(f"  [早停] gen={gen+1}/{self.maxiter}: 折衷解连续 "
+                          f"{self.early_stop_patience} 代无改善 "
+                          f"(best L2={self._best_l2:.6f}, best RSE={self._best_rse:.4f})")
+                    break
 
             # 拥挤距离（按 2 个目标的值域归一化，避免量级差异导致选择失衡；n_actual 不参与）
             crowding = self._crowding_distance(objectives, fronts)
@@ -1355,11 +1560,8 @@ class NVITA_NSGA2:
                 offspring.append(c2)
             offspring = offspring[:self.pop_size]   # 【变长编码】保持 list 容器，不堆叠成矩形矩阵
 
-            # 评估子代双目标 + 约束变量
-            offspring_obj = np.zeros((len(offspring), 2))
-            n_actual_off = np.zeros(len(offspring))
-            for i in range(len(offspring)):
-                offspring_obj[i], n_actual_off[i] = _eval_and_track(offspring[i])
+            # 评估子代双目标 + 约束变量（一次批量前向）
+            offspring_obj, n_actual_off = _eval_batch_and_track(offspring)   # (len(offspring),2), (len(offspring),)
 
             # μ+λ 环境选择：合并父代和子代（变长个体无法 vstack，改用 list 拼接）
             combined_pop = population + offspring
@@ -1479,7 +1681,8 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
                                 print_info=False, select_mode='knee', knee_min_rse=2.0,
                                 insert_prob=0.1, delete_prob=0.1, use_window_range=False,
                                 knee_l2_weight=0.3, knee_rse_weight=0.7,
-                                select_strategy='knee', front_percentile=0.6):
+                                select_strategy='knee', front_percentile=0.6,
+                                early_stop_patience=20, early_stop_warmup=50):
     """
     批量运行 NSGA-II 双目标变长攻击（L0 作为约束）
 
@@ -1533,6 +1736,8 @@ def run_nsga2_standalone_attack(model, X_test, Y_test, beta, n_min, n_max, maxit
         candidate_pool_size=NSGA2_CONFIG.get('candidate_pool_size', 20),
         guided_ratio_start=NSGA2_CONFIG.get('guided_ratio_start', 0.6),
         guided_ratio_end=NSGA2_CONFIG.get('guided_ratio_end', 0.3),
+        early_stop_patience=early_stop_patience,
+        early_stop_warmup=early_stop_warmup,
     )
 
     total = X_test.shape[0]
@@ -2633,11 +2838,23 @@ def main():
                         help='percentile策略：候选解按 L2 升序后取第 int(k*该值) 个位置（0~1）')
     parser.add_argument('--num_eval_samples', type=int, default=NSGA2_CONFIG['num_eval_samples'],
                         help='参加 NSGA-II 评估的样本数量（默认 None=全部，正整数则从数据池头部截取）')
+    parser.add_argument('--early_stop_patience', type=int,
+                        default=NSGA2_CONFIG.get('early_stop_patience', 20),
+                        help='早停耐心：折衷解 L2/RSE 任一指标连续多少代未刷新历史最佳即停（<=0 禁用，默认 20）')
+    parser.add_argument('--early_stop_warmup', type=int,
+                        default=NSGA2_CONFIG.get('early_stop_warmup', 50),
+                        help='早停预热代数：之前只追踪最佳不判停（默认 50）')
     # ====== 模型冻结与复用参数 ======
     parser.add_argument('--save_model', type=str, default=None,
                         help='Path to save the trained model checkpoint (model weights + architecture params)')
     parser.add_argument('--load_model', type=str, default=None,
                         help='Path to load a pre-trained model checkpoint (skip training)')
+    parser.add_argument('--force_train', action='store_true',
+                        help='强制重新训练：即使默认权重 weights/pretrained_moacb_wsf.pt 存在也不自动跳过训练'
+                             '（不加此参数时，默认权重存在则直接加载进入攻击阶段）')
+    parser.add_argument('--no_export_scripted', action='store_true',
+                        help='禁用 TorchScript 导出（默认在 --save_model/--load_model 同目录额外导出 *_scripted.pt，'
+                             '使各攻击脚本可不定义模型类直接 torch.jit.load 推理）')
     parser.add_argument('--encoding_config', type=str, default=None,
                         help='自定义编码配置文件(JSON)，包含 topo/cnn_params/lstm_params/setting；不指定则使用论文固定编码')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -2713,6 +2930,14 @@ def main():
     print(f"[扰动预算] 训练集逐特征 range_f = {np.round(train_feature_ranges, 4).tolist()}（与 FGSM 同口径）")
 
     # ====== 判断是否触发 load_model 模式 ======
+    # 【运行按钮一键进入攻击】未显式传 --load_model 且未 --force_train 时，
+    #   若默认权重 weights/pretrained_moacb_wsf.pt 已存在，则自动加载它跳过训练、直接进入攻击阶段；
+    #   若不存在则正常训练，并自动将权重（+TorchScript）保存到该默认路径，供下次 Run 直接跳过训练。
+    DEFAULT_CKPT = os.path.join(WEIGHTS_DIR, 'pretrained_moacb_wsf.pt')
+    if args.load_model is None and not args.force_train and os.path.isfile(DEFAULT_CKPT):
+        args.load_model = DEFAULT_CKPT
+        print(f"\n>>> 检测到默认权重 {DEFAULT_CKPT}，自动加载并跳过训练（如需重训请加 --force_train）。")
+
     load_model_mode = args.load_model is not None and os.path.isfile(args.load_model)
     if load_model_mode:
         print(f"\n>>> 检测到 --load_model 路径: {args.load_model}")
@@ -2723,6 +2948,11 @@ def main():
         if args.load_model is not None and not os.path.isfile(args.load_model):
             print(f"\n>>> 警告: --load_model 指定的文件不存在: {args.load_model}")
             print(">>> 将按正常流程使用固定编码训练模型。")
+        # 【首次训练自动落盘】未指定 --save_model 时默认存到 DEFAULT_CKPT，
+        #   使下次直接按运行按钮即可命中上面的自动加载、跳过训练。
+        if args.save_model is None:
+            args.save_model = DEFAULT_CKPT
+            print(f"\n>>> 未指定 --save_model，训练完成后将自动保存权重至: {DEFAULT_CKPT}")
         actual_num_runs = NUM_RUNS
 
     for run_id in range(actual_num_runs):
@@ -2753,6 +2983,9 @@ def main():
             model.load_state_dict(checkpoint['model_state_dict'])
             model.eval()
             print(">>> 模型加载成功！已跳过模型训练阶段。")
+            # 将加载的权重额外导出为 TorchScript，供 nVITA / baseline 等攻击脚本无需模型类直接加载
+            if not args.no_export_scripted:
+                export_scripted_model(model, scripted_ckpt_path(args.load_model), num_features=num_features)
             print(f'\n  已加载模型的混合编码向量:')
             print(f'    topo:    {topo}')
             print(f'    CNN:     {cnn_params}')
@@ -2765,7 +2998,51 @@ def main():
 
             # 为后续兼容：初始化占位变量（加载模式下不使用）
             train_losses, val_losses = [], []
-            test_performance = {}
+
+            # ====== 加载模式下同样评估并打印预测模型指标（与训练分支同口径，保证命令行可见） ======
+            model.eval()
+            test_loader = DataLoader(test_dataset, batch_size=batch_size)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size)
+            all_test_targets = []
+            all_test_outputs = []
+            with torch.no_grad():
+                for inputs, targets in test_loader:
+                    inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+                    outputs = model(inputs)
+                    all_test_targets.extend(targets.cpu().numpy())
+                    all_test_outputs.extend(outputs.cpu().numpy())
+            all_test_targets = np.array(all_test_targets) * (max_speed - min_speed) + min_speed
+            all_test_outputs = np.array(all_test_outputs) * (max_speed - min_speed) + min_speed
+            all_test_targets = all_test_targets.flatten()
+            all_test_outputs = all_test_outputs.flatten()
+
+            mae_test = mean_absolute_error(all_test_targets, all_test_outputs)
+            rmse_test = np.sqrt(mean_squared_error(all_test_targets, all_test_outputs))
+            mape_test = np.mean(np.abs((all_test_targets - all_test_outputs) / all_test_targets)) * 100
+            r2_test = r2_score(all_test_targets, all_test_outputs)
+            r_test = pearsonr(all_test_targets, all_test_outputs)[0]
+
+            print(f'\n[加载模式] 预测模型测试集最终性能:')
+            print(f'  MAE: {mae_test:.4f} m/s')
+            print(f'  RMSE: {rmse_test:.4f} m/s')
+            print(f'  MAPE: {mape_test:.2f}%')
+            print(f'  R²: {r2_test:.4f}')
+            print(f'  相关系数: {r_test:.4f}')
+
+            test_performance = {'mae': mae_test, 'rmse': rmse_test, 'mape': mape_test}
+
+            # 生成综合报告（与训练分支一致：详细性能报告 + 特征权重图 + 测试集预测CSV）
+            report_metrics = generate_comprehensive_report(
+                model, test_loader, val_loader, DEVICE, min_speed, max_speed,
+                feature_columns, topo, cnn_params, lstm_params, setting,
+                test_performance, r_test, save_prefix=prefix
+            )
+            print('\n========== 代码运行结束后保存文件 ==========')
+            test_results_df = pd.DataFrame({
+                '真实风速 (m/s)': all_test_targets,
+                '预测风速 (m/s)': all_test_outputs
+            })
+            test_results_df.to_csv(f'{prefix}test_set_wind_speed_predictions.csv', index=False, encoding='utf-8-sig')
         else:
             # ---------- 固定编码流程: 直接构建模型并训练 ----------
             print('\n========== 使用固定编码构建并训练模型 ==========')
@@ -2953,6 +3230,10 @@ def main():
                 }, save_path)
                 print(f"\n>>> 模型 checkpoint 已保存至: {save_path}")
 
+                # 额外导出 TorchScript（权重+计算图内嵌），供各攻击脚本不定义模型类直接推理
+                if not args.no_export_scripted:
+                    export_scripted_model(model, scripted_ckpt_path(save_path), num_features=num_features)
+
             # 生成综合报告
             report_metrics = generate_comprehensive_report(
                 model, test_loader, val_loader, DEVICE, min_speed, max_speed,
@@ -3014,6 +3295,8 @@ def main():
                 insert_prob=NSGA2_CONFIG['insert_prob'],
                 delete_prob=NSGA2_CONFIG['delete_prob'],
                 use_window_range=False,   # 【扰动预算对齐 FGSM】用全局 range_f 而非逐窗口极差
+                early_stop_patience=args.early_stop_patience,
+                early_stop_warmup=args.early_stop_warmup,
             )
 
             # 评估攻击效果

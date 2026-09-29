@@ -47,7 +47,12 @@ warnings.filterwarnings('ignore')
 plt.rcParams["font.family"] = ["SimHei", "Microsoft YaHei", "SimSun", "DejaVu Sans"]
 plt.rcParams['axes.unicode_minus'] = False
 
-OUTPUT_DIR = 'output'
+# 【路径基准】脚本已归入 attacks/lba/，数据/结果目录统一以项目根目录为基准（由 __file__ 推导绝对路径，不依赖 CWD）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
+DATA_DIR = os.path.join(_PROJECT_ROOT, 'data')
+
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT, 'results')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_DIR, 'LBA_models'), exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_DIR, 'attack_results'), exist_ok=True)
@@ -55,7 +60,7 @@ os.makedirs(os.path.join(OUTPUT_DIR, 'attack_results'), exist_ok=True)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # ==================== MoACB-WSF Configuration ====================
-FILENAME = 'winddata.xlsx'
+FILENAME = os.path.join(DATA_DIR, 'winddata.xlsx')
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
 SEQUENCE_LENGTH =24
@@ -1901,7 +1906,7 @@ def generate_comprehensive_report(model, test_loader, val_loader, device, min_sp
 
 def main():
     parser = argparse.ArgumentParser(description='MoACB-WSF with LBA Adversarial Attack')
-    parser.add_argument('--data_file', type=str, default='winddata.xlsx', help='Input data file')
+    parser.add_argument('--data_file', type=str, default=FILENAME, help='Input data file')
     parser.add_argument('--no_attack', action='store_true', help='Skip LBA attack evaluation')
     parser.add_argument('--beta', type=float, default=0.1, help='nVITA perturbation budget (原论文 β)')
     parser.add_argument('--n_perturb', type=int, default=1, help='Number of perturbations (nVITA)')

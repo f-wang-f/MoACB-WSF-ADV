@@ -26,7 +26,7 @@ n–RSE / n–L2 两张曲线图，以及【攻击前后预测差别】可视化
   * 非目标攻击梯度符号为 +sign（最大化预测误差）；
   * 全程 model.eval()；仅在【测试集】上评估，绝不混入验证集。
 
-本脚本【不修改】任何现有文件；训练得到的权重保存为 output/pretrained_moacb_wsf.pt。
+本脚本【不修改】任何现有文件；训练得到的权重保存为 weights/pretrained_moacb_wsf.pt。
 运行：python baseline_gradient_attacks.py
 """
 
@@ -35,6 +35,7 @@ import sys
 import random
 import warnings
 import argparse
+import io
 
 import numpy as np
 import pandas as pd
@@ -74,13 +75,22 @@ for _stream in (sys.stdout, sys.stderr):
 plt.rcParams["font.family"] = ["SimHei", "Microsoft YaHei", "SimSun", "DejaVu Sans"]
 plt.rcParams['axes.unicode_minus'] = False
 
-OUTPUT_DIR = 'output'
+# 【路径基准】脚本已归入 attacks/baselines/，数据/权重/结果目录统一以项目根目录为基准（由 __file__ 推导绝对路径，不依赖 CWD）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
+DATA_DIR = os.path.join(_PROJECT_ROOT, 'data')
+
+OUTPUT_DIR = os.path.join(_PROJECT_ROOT, 'results')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 【权重专用目录】与主文件 / nVITA 统一，从 output/ 拆分出来集中存放权重文件
+WEIGHTS_DIR = os.path.join(_PROJECT_ROOT, 'target_models')
+os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # ---------- 数据 / 模型配置（与主文件完全一致）----------
-FILENAME = 'winddata.xlsx'
+FILENAME = os.path.join(DATA_DIR, 'winddata.xlsx')
 FEATURE_COLUMNS = ['Wind Direction', 'Theoretical_Power_Curve (KWh)', 'LV ActivePower (kW)', 'Wind Speed (m/s)']
 TARGET_COLUMN = 'Wind Speed (m/s)'
 SEQUENCE_LENGTH = 20
@@ -116,7 +126,7 @@ BATCH_SIZE_MAP = {0: 32, 1: 64, 2: 96, 3: 128}
 # ---------- 固定编码向量（取自现有主文件 LBA-MOACB-WSF-FixedEncoding.py 的实际 FIXED_ENCODING）----------
 # topo    = [1, 1, 1, 1, 0, 0, 0, 0, 0, 0]
 # Setting = [0, 0, 0.0072, 3] → batch_size=32, optimizer=SGD(momentum=0.9), lr=0.0072, regularizer=L1L2
-# 【模型来源】本基线优先【加载】output/pretrained_moacb_wsf.pt —— 该权重由主文件
+# 【模型来源】本基线优先【加载】weights/pretrained_moacb_wsf.pt —— 该权重由主文件
 #   LBA-MOACB-WSF-FixedEncoding.py 用下面这组实际编码训练并保存（--save_model），
 #   因此 clean 测试集性能与主文件完全一致（MAE≈0.6891, RMSE≈0.9007, R²≈0.9224, R≈0.9656）。
 #   若 checkpoint 缺失，则用同一编码按主文件训练流程重训一次并保存。
@@ -141,7 +151,7 @@ FIXED_ENCODING = {
 # ---------- 攻击超参数（β / n_iter / n_list / τ 全部集中在此处，便于统一调整）----------
 SEED = 42                          # 与主文件一致的随机种子（保证训练可复现）
 BETA = 0.01                         # 【唯一 β，改这一行即可】稀疏 FGSM/BIM 扰动预算系数；不做 β 扫描
-BIM_STEPS = 10                     # 稀疏 BIM 迭代步数 N（n_iter）
+BIM_STEPS = 100                     # 稀疏 BIM 迭代步数 N（n_iter）
 N_LIST = [4]                      # 扰动点数 n（即 L0 范数）列表；默认只跑单一 n=10，可用 --n_list 传多个值做扫描
 RSE_SUCCESS_THRESHOLD = 1.0        # 攻击成功判定阈值 τ（RSE >= τ 记为成功，用于 ASR）
 L0_EPS = 1e-8                      # L0 计数阈值：|δ| > 该值视为一次扰动
@@ -153,7 +163,7 @@ WORST_CASE_K = 4                   # 典型样本对比图数量（按逐样本 
 HIST_BINS = 25                     # 攻击前后误差分布直方图的分箱数
 
 # ---------- 输出文件路径 ----------
-PRETRAINED_CKPT = os.path.join(OUTPUT_DIR, 'pretrained_moacb_wsf.pt')
+PRETRAINED_CKPT = os.path.join(WEIGHTS_DIR, 'pretrained_moacb_wsf.pt')
 RESULT_CSV = os.path.join(OUTPUT_DIR, 'baseline_sparse_gradient_attacks_results.csv')
 CURVE_RSE_PNG = os.path.join(OUTPUT_DIR, 'baseline_sparse_n_rse_curve.png')
 CURVE_L2_PNG = os.path.join(OUTPUT_DIR, 'baseline_sparse_n_l2_curve.png')
@@ -586,6 +596,60 @@ def evaluate_model_metrics(model, test_dataset, min_speed, max_speed, batch_size
             'n_test': int(len(all_test_targets))}
 
 
+def scripted_ckpt_path(ckpt_path):
+    """由 state_dict checkpoint 路径推导其 TorchScript 脚本路径（同名 + _scripted.pt 后缀）。
+    与主文件 LBA-MOACB-WSF-FixedEncoding.py / nVITA_DE_Attack.py 命名约定一致。"""
+    stem, _ = os.path.splitext(ckpt_path)
+    return stem + '_scripted.pt'
+
+
+def export_scripted_model(model, save_path, num_features=None):
+    """把已定结构模型 trace 成 TorchScript 并保存（内嵌权重+计算图，加载无需模型类）。
+    失败时仅告警，不影响已保存的 state_dict checkpoint。"""
+    base = model.module if isinstance(model, nn.DataParallel) else model
+    nf = num_features if num_features is not None else getattr(base, 'num_features', None)
+    if nf is None:
+        print('>>> TorchScript 导出跳过：无法确定 num_features 以构造 trace 样例输入。')
+        return False
+    was_training = base.training
+    base.eval()
+    try:
+        example = torch.rand(1, SEQUENCE_LENGTH, nf, device=DEVICE, dtype=torch.float32)
+        with torch.no_grad():
+            traced = torch.jit.trace(base, example)
+        os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+        # 【中文/非 ASCII 路径兼容】torch.jit.save 直接传路径会走 C++ 归档器，在 Windows 非 ASCII
+        # 路径上报 "Parent directory ... does not exist"；改为先存内存 BytesIO，再用普通文件写入落盘。
+        buf = io.BytesIO()
+        torch.jit.save(traced, buf)
+        with open(save_path, 'wb') as f:
+            f.write(buf.getvalue())
+        print(f'>>> TorchScript 模型已导出（含权重+结构，加载无需模型类）: {save_path}')
+        return True
+    except Exception as e:
+        print(f'>>> TorchScript 导出失败（{e}），仅保留 state_dict checkpoint。')
+        return False
+    finally:
+        if was_training:
+            base.train()
+
+
+def load_scripted_model(path):
+    """尝试以 TorchScript 方式加载模型（无需模型类定义）；文件不存在或失败返回 None。
+    traced 模块保留 autograd，仍可对【输入】求梯度，故 SparseFGSM / SparseBIM 可直接复用。"""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, 'rb') as f:
+            buf = io.BytesIO(f.read())
+        m = torch.jit.load(buf, map_location=DEVICE)
+        m.eval()
+        return m
+    except Exception as e:
+        print(f'>>> TorchScript 加载失败（{e}），回退到 state_dict+编码 路径。')
+        return None
+
+
 def load_or_train_model(data_result):
     """模型权重获取：优先加载 output/pretrained_moacb_wsf.pt（state_dict 能无损装入
     目标结构即视为编码一致）；否则用固定编码重新训练（训练前 set_seed 以复现主文件），
@@ -595,6 +659,13 @@ def load_or_train_model(data_result):
     cnn_params = FIXED_ENCODING['cnn_params']
     lstm_params = FIXED_ENCODING['lstm_params']
     setting = FIXED_ENCODING['setting']
+
+    # ---------- 0) 最优先：加载 TorchScript 脚本（不定义模型类、不用编码重建结构，直接推理） ----------
+    #   traced 模块保留 autograd，SparseFGSM/SparseBIM 仍可对输入 X 求梯度，与 nn.Module 同口径。
+    smodel = load_scripted_model(scripted_ckpt_path(PRETRAINED_CKPT))
+    if smodel is not None:
+        print(f"\n>>> 已加载 TorchScript 基准模型（无需模型类定义）: {scripted_ckpt_path(PRETRAINED_CKPT)}（跳过训练）")
+        return smodel
 
     # ---------- 1) 优先尝试加载已有权重 ----------
     if os.path.isfile(PRETRAINED_CKPT):
@@ -619,6 +690,8 @@ def load_or_train_model(data_result):
         'topo': topo, 'cnn_params': cnn_params, 'lstm_params': lstm_params, 'setting': setting,
     }, PRETRAINED_CKPT)
     print(f"\n>>> 训练完成，权重已保存至: {PRETRAINED_CKPT}")
+    # 额外导出 TorchScript，供后续运行不定义模型类直接加载推理
+    export_scripted_model(model, scripted_ckpt_path(PRETRAINED_CKPT), num_features=num_features)
     return model
 
 
